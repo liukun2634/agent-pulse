@@ -1,6 +1,6 @@
 export type Provider = 'claude' | 'codex' | 'copilot'
 export type SessionStatus =
-  'running' | 'waiting' | 'completed' | 'failed' | 'disconnected' | 'unknown'
+  'running' | 'waiting' | 'completed' | 'failed' | 'disconnected' | 'unknown' | 'idle' | 'cancelled'
 export type SessionFilter = 'all' | 'running' | 'attention' | 'completed'
 
 export interface SessionEvent {
@@ -18,6 +18,7 @@ export interface Session {
   provider: Provider
   source?: 'vscode'
   statusDetail?: string
+  requestId?: string
   status: SessionStatus
   startedAt: number
   updatedAt: number
@@ -39,6 +40,8 @@ export const statusLabels: Record<SessionStatus, string> = {
   failed: 'Failed',
   disconnected: 'Disconnected',
   unknown: 'Status unknown',
+  idle: 'No recent activity',
+  cancelled: 'Stopped',
 }
 
 export function createDemoSessions(now = Date.now()): Session[] {
@@ -180,6 +183,8 @@ const transitions: Record<SessionStatus, SessionStatus[]> = {
   failed: ['running'],
   disconnected: ['running', 'failed'],
   unknown: [],
+  idle: [],
+  cancelled: [],
 }
 
 export function changeStatus(
@@ -199,6 +204,8 @@ export function changeStatus(
     failed: 'Execution stopped with an error',
     disconnected: 'Connection lost',
     unknown: 'Status is unknown',
+    idle: 'No recent activity',
+    cancelled: 'Session stopped',
   }
   return sessions.map((session) =>
     session.id !== id

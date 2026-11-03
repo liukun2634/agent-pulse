@@ -3,6 +3,7 @@ const { test } = require('node:test')
 const {
   createTranscript,
   applyEvent,
+  applyChatEvent,
   toSession,
   createVSCodeSource,
   pollInterval,
@@ -53,9 +54,22 @@ test('silence and incomplete lifecycle evidence never imply success', () => {
   feed(state, 'assistant.turn_end')
   assert.equal(toSession(state, now).status, 'unknown')
   feed(state, 'assistant.turn_start')
-  assert.equal(toSession(state, now + 121000).status, 'unknown')
+  assert.equal(toSession(state, now + 121000).status, 'idle')
   applyEvent(state, { type: 'session.error', timestamp: 'invalid' })
   assert.equal(toSession(state, now).status, 'running')
+})
+
+test('saved request completion overrides an unfinished transcript and a new request resumes it', () => {
+  const state = createTranscript('saved', 'project')
+  feed(state, 'assistant.turn_start')
+  const chat = {}
+  applyChatEvent(chat, { kind: 2, k: ['requests'], v: [{ requestId: 'first', timestamp: now, modelState: { value: 0 } }] })
+  applyChatEvent(chat, { kind: 1, k: ['requests', 0, 'modelState'], v: { value: 1, completedAt: now + 1000 } })
+  assert.equal(toSession(state, now + 200000, chat).status, 'completed')
+  assert.equal(toSession(state, now + 200000, chat).finishedAt, now + 1000)
+  applyChatEvent(chat, { kind: 2, k: ['requests'], v: [{ requestId: 'second', timestamp: now + 300000, modelState: { value: 0 } }] })
+  assert.equal(toSession(state, now + 300000, chat).status, 'running')
+  assert.equal(toSession(state, now + 300000, chat).finishedAt, null)
 })
 
 test('source discovers workspaces, tails partial UTF-8 lines and handles truncation', async () => {
@@ -152,9 +166,9 @@ test('idle reads back off, file changes wake them, and refresh bypasses the dela
     const event = (type, at) =>
       JSON.stringify({ type, data: {}, timestamp: new Date(at).toISOString() }) + '\n'
     await fs.writeFile(filename, event('assistant.turn_start', now - 900000))
-    assert.equal((await source.scan(now)).sessions[0].status, 'unknown')
+    assert.equal((await source.scan(now)).sessions[0].status, 'idle')
     await fs.appendFile(filename, event('assistant.turn_start', now + 1000))
-    assert.equal((await source.scan(now + 1000)).sessions[0].status, 'unknown')
+    assert.equal((await source.scan(now + 1000)).sessions[0].status, 'idle')
     wake('change', 'session-one.jsonl')
     assert.equal((await source.scan(now + 1000)).sessions[0].status, 'running')
     await fs.appendFile(filename, event('session.error', now + 2000))
@@ -164,7 +178,7 @@ test('idle reads back off, file changes wake them, and refresh bypasses the dela
     assert.equal((await source.scan(now + 3100, { force: true })).sessions[0].status, 'running')
     await source.scan(now + 900000)
     await fs.appendFile(filename, event('session.error', now + 900001))
-    assert.equal((await source.scan(now + 959999)).sessions[0].status, 'unknown')
+    assert.equal((await source.scan(now + 959999)).sessions[0].status, 'idle')
     assert.equal((await source.scan(now + 960000)).sessions[0].status, 'failed')
   } finally {
     source.close()

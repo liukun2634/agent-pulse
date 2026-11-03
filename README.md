@@ -1,8 +1,10 @@
-# Pulse
+# Agent Pulse
 
-A local desktop workspace for agent sessions, built with React, TypeScript and Electron.
+**English** | [简体中文](README.zh-CN.md)
 
-The desktop app includes an **experimental, read-only VS Code / GitHub Copilot adapter**. It reads local Copilot transcript events with idle-aware polling and file-change wakeups. The browser preview and the separate Demo source still use sample data. Claude Code and Codex are not connected yet.
+A local desktop workspace for agent sessions: a pulse monitor for your AI agents, built with React, TypeScript and Electron.
+
+The desktop app includes an **experimental, read-only VS Code / GitHub Copilot adapter**. It reads local Copilot transcript events and saved chat request state with idle-aware polling and file-change wakeups. The browser preview and the separate Demo source still use sample data. Claude Code and Codex are not connected yet.
 
 ## Run
 
@@ -29,9 +31,9 @@ npm run desktop:dev
 
 The desktop app starts with VS Code selected. It discovers local workspace folders and saved `.code-workspace` workspaces under VS Code's user storage. On Windows the default is `%APPDATA%\Code\User\workspaceStorage`. Open the app alongside VS Code and look for your project, then use Mini monitor to keep it at the screen edge. Settings enables optional system notifications for input requests, finished replies and session errors.
 
-The adapter reads `GitHub.copilot-chat/transcripts/*.jsonl` incrementally. It shows up to 100 recent transcript-backed sessions, with the latest 40 timeline events per session. Session IDs include the workspace identity. A saved `customTitle`, when available within the first 1 MiB of the matching `chatSessions` record, supplies the display title; otherwise a transcript user message or a generic label is used. Titles are cached in memory until restart or transcript reset.
+The adapter reads `GitHub.copilot-chat/transcripts/*.jsonl` incrementally. It shows up to 100 recent transcript-backed sessions, with the latest 40 timeline events per session. Session IDs include the workspace identity. Matching `chatSessions/*.jsonl` records are also read incrementally for saved titles and the latest request state. A saved `customTitle`, when available, supplies the display title; otherwise a transcript user message or a generic label is used. Saved title changes are reflected on subsequent reads. Request state can supply completion, cancellation, error and input signals that are missing from the transcript.
 
-Lightweight directory discovery and snapshot publication run every two seconds so newly created or removed sessions remain visible. For known sessions, file checks and reads back off with idle time: 2 seconds below 30 seconds idle, 5 seconds below 2 minutes, 15 seconds below 10 minutes, then 60 seconds. A transcript-directory change wakes the affected session on the next discovery tick and restores fast checks after new data is read. If filesystem notifications are unavailable or missed, the bounded polling interval remains the fallback. Manual Refresh and switching to VS Code bypass the idle delay. Partial writes and unread backlog stay on fast polling.
+Lightweight directory discovery and snapshot publication run every two seconds so newly created or removed sessions remain visible. For known sessions, file checks and reads back off with idle time: 2 seconds below 30 seconds idle, 5 seconds below 2 minutes, 15 seconds below 10 minutes, then 60 seconds. Changes in transcript or saved-chat directories wake the affected session on the next discovery tick. New transcript activity or a newer saved request restores fast checks. If filesystem notifications are unavailable or missed, the bounded polling interval remains the fallback. Manual Refresh and switching to VS Code bypass the idle delay. Partial writes and unread backlog stay on fast polling.
 
 Cards, the side monitor and session details display **Idle**, the time since the last observed transcript activity, updated every second without rereading the log. It continues to grow after a reply finishes and resets when a newer event arrives. This is not a claim that the agent is doing no work. **Elapsed** remains separately available in the details and freezes when the observed reply ends.
 
@@ -47,15 +49,17 @@ Only `vscode` and `vscode-insiders` URL schemes are supported. Missing or unread
 
 ### Status semantics
 
-| Status         | Evidence                                                                                                                                                       |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| In progress    | A user message, assistant turn or tool event is active.                                                                                                        |
-| Needs input    | A known question tool, such as `vscode_askQuestions`, is pending.                                                                                              |
-| Completed      | A nonempty assistant reply without tool requests is followed by a turn end, with no pending tools. This means the reply ended, not that the task succeeded.    |
-| Failed         | An explicit `session.error` event. A failed tool alone does not fail the session because the agent may recover.                                                |
-| Status unknown | Incomplete lifecycle evidence, a partial log update, or no new activity for two minutes while previously running or waiting. Silence never implies completion. |
+| Status | Evidence |
+| --- | --- |
+| In progress | A user message, assistant turn or tool event is active, or a newer saved request has started. |
+| Needs input | A known question tool, such as `vscode_askQuestions`, is pending, or the current saved request indicates input is needed. |
+| Completed | A nonempty assistant reply without tool requests is followed by a turn end with no pending tools, or the current saved request records a successful finish. This means the reply ended, not that the task succeeded. |
+| Failed | An explicit `session.error` event, or a finished saved request marked with an error. A failed tool alone does not fail the session because the agent may recover. |
+| Stopped | The current saved request records cancellation. |
+| No recent activity | A previously running session has no new activity for two minutes and no completion signal. The agent may still be working. |
+| Status unknown | Incomplete lifecycle evidence or a partial log update. Silence never implies completion. |
 
-These are inferred states from internal, version-dependent files, not an official Copilot lifecycle API or a VS Code process heartbeat. Some permission prompts, cancellations and final responses may not be recorded. A long-running tool or unanswered question may therefore become unknown. Historical transcripts remain visible and are not necessarily open chats. Branch and file-change counts are not inferred, and elapsed time starts at the earliest observed transcript event.
+These are inferred states from internal, version-dependent files, not an official Copilot lifecycle API or a VS Code process heartbeat. Some permission prompts, cancellations and final responses may not be recorded in either source. Missing completion signals may leave a session idle or unknown; an observed input request can remain waiting until a later update resolves it. Historical transcripts remain visible and are not necessarily open chats. Branch and file-change counts are not inferred, and elapsed time starts at the earliest observed transcript event.
 
 **Open VS Code workspace opens the owning folder/workspace, not an exact chat.** Select the relevant conversation in VS Code to reply or approve permissions. Pulse does not submit messages, inject keystrokes, edit VS Code chat storage or auto-approve requests.
 
