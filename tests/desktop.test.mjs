@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { pathToFileURL } from 'node:url'
+import { expect } from '@playwright/test'
 import { _electron as electron } from 'playwright'
 
 test('desktop pinning, mini monitor and session synchronization', { timeout: 90000 }, async () => {
@@ -10,6 +12,7 @@ test('desktop pinning, mini monitor and session synchronization', { timeout: 900
   const environment = { ...process.env, PULSE_TEST_MODE: '1', PULSE_TEST_DATA: userData }
   delete environment.ELECTRON_RUN_AS_NODE
   delete environment.PULSE_DEV_SERVER_URL
+  delete environment.PULSE_VSCODE_STORAGE
   let application
 
   try {
@@ -177,3 +180,176 @@ test('desktop pinning, mini monitor and session synchronization', { timeout: 900
     rmSync(userData, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
   }
 })
+
+test(
+  'live VS Code sessions update both windows without demo mutations',
+  { timeout: 90000 },
+  async () => {
+    const temporary = mkdtempSync(path.join(tmpdir(), 'pulse-live-test-'))
+    const storage = path.join(temporary, 'storage')
+    const workspace = path.join(storage, 'workspace-one')
+    const transcripts = path.join(workspace, 'GitHub.copilot-chat', 'transcripts')
+    mkdirSync(transcripts, { recursive: true })
+    const projectPath = path.join(temporary, 'Live project')
+    writeFileSync(
+      path.join(workspace, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL(projectPath).href }),
+    )
+    const filename = path.join(transcripts, 'session-one.jsonl')
+    let eventNumber = 0
+    const append = (type, data = {}) =>
+      appendFileSync(
+        filename,
+        JSON.stringify({
+          id: `event-${++eventNumber}`,
+          type,
+          data,
+          timestamp: new Date().toISOString(),
+        }) + '\n',
+      )
+    append('user.message', { content: 'Monitor current workspace' })
+    append('assistant.turn_start')
+    const environment = {
+      ...process.env,
+      PULSE_TEST_MODE: '1',
+      PULSE_TEST_DATA: path.join(temporary, 'app'),
+      PULSE_VSCODE_STORAGE: storage,
+    }
+    delete environment.ELECTRON_RUN_AS_NODE
+    delete environment.PULSE_DEV_SERVER_URL
+    delete environment.PULSE_VSCODE_SCHEME
+    let application
+
+    try {
+      application = await electron.launch({
+        args: [process.cwd()],
+        env: environment,
+        timeout: 30000,
+      })
+      const main = await application.firstWindow()
+      const errors = []
+      main.on('pageerror', (error) => errors.push(error.message))
+      await expect(main.locator('.session-card')).toHaveCount(1)
+      await expect(main.locator('.inspector h2')).toHaveText('Monitor current workspace')
+      await expect(main.locator('.inspector > .status-badge')).toHaveText('In progress')
+      await expect(main.getByRole('button', { name: 'Run demo', exact: true })).toHaveCount(0)
+      await expect(main.getByRole('button', { name: 'Reset demo', exact: true })).toBeDisabled()
+      assert.equal(await main.evaluate(() => localStorage.getItem('pulse.demo.sessions.v1')), null)
+      assert.equal(
+        await main.evaluate(async () => {
+          try {
+            await window.pulse.openVSCode('untrusted-id')
+            return false
+          } catch {
+            return true
+          }
+        }),
+        true,
+      )
+
+      await application.evaluate(({ shell }) => {
+        shell.openExternal = async (uri) => {
+          globalThis.pulseTestOpenedUri = uri
+        }
+      })
+      await main.getByRole('button', { name: 'Open VS Code workspace', exact: true }).click()
+      assert.equal(
+        await application.evaluate(() => globalThis.pulseTestOpenedUri),
+        `vscode://file${pathToFileURL(projectPath).pathname}`,
+      )
+
+      const miniPromise = application.waitForEvent('window')
+      await main.getByRole('button', { name: 'Mini monitor', exact: true }).click()
+      const mini = await miniPromise
+      mini.on('pageerror', (error) => errors.push(error.message))
+      await expect(mini.locator('.mini-session')).toHaveCount(1)
+      append('assistant.message', {
+        toolRequests: [{ toolCallId: 'question-one', name: 'vscode_askQuestions' }],
+      })
+      append('assistant.turn_end')
+      append('assistant.turn_start')
+      await expect(main.locator('.inspector > .status-badge')).toHaveText('Needs input', {
+        timeout: 10000,
+      })
+      await expect(mini.locator('.mini-session .status-badge')).toHaveText('Needs input')
+      await expect(mini.locator('.toast')).toContainText('Input needed in VS Code')
+      await expect(main.getByRole('button', { name: 'Approve in demo' })).toHaveCount(0)
+
+      append('tool.execution_complete', { toolCallId: 'question-one', success: true })
+      append('assistant.message', { content: 'Reply finished' })
+      append('assistant.turn_end')
+      await expect(mini.locator('.mini-session .status-badge')).toHaveText('Completed', {
+        timeout: 10000,
+      })
+      await expect(main.locator('.inspector > .status-badge')).toHaveText('Completed')
+      await expect(mini.locator('.toast')).toContainText('Assistant reply finished')
+      const updatedAt = await main.evaluate(
+        async () => (await window.pulse.getSessionFeed()).sessions[0].updatedAt,
+      )
+      const elapsedBefore = await main
+        .locator('.session-facts > div')
+        .filter({ hasText: 'Elapsed' })
+        .locator('dd')
+        .textContent()
+      await main.clock.install({ time: updatedAt })
+      await main.clock.fastForward(65000)
+      await expect(main.locator('.session-card .duration')).toHaveText('Idle 01:05')
+      await expect(
+        main.locator('.session-facts > div').filter({ hasText: 'Idle' }).locator('dd'),
+      ).toHaveText('01:05')
+      await expect(
+        main.locator('.session-facts > div').filter({ hasText: 'Elapsed' }).locator('dd'),
+      ).toHaveText(elapsedBefore)
+      await mini.clock.install({ time: updatedAt })
+      await mini.clock.fastForward(65000)
+      await expect(mini.locator('.mini-session-end')).toContainText('Idle 01:05')
+      mkdirSync('.artifacts', { recursive: true })
+      await mini.screenshot({
+        path: '.artifacts/mini-live.png',
+        animations: 'disabled',
+        scale: 'css',
+      })
+      await mini.getByRole('button', { name: 'Open workspace', exact: true }).click()
+      await main.screenshot({
+        path: '.artifacts/desktop-live.png',
+        animations: 'disabled',
+        scale: 'css',
+      })
+      const geometry = await main.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth > innerWidth,
+        clipped: [...document.querySelectorAll('.button, .session-provider')].some(
+          (element) => element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1,
+        ),
+      }))
+      assert.deepEqual(geometry, { overflow: false, clipped: false })
+
+      await main.getByRole('button', { name: 'Demo', exact: true }).click()
+      await expect(main.locator('.session-card')).toHaveCount(6)
+      await expect(mini.locator('.mini-session')).toHaveCount(6)
+      await main.getByRole('button', { name: 'VS Code', exact: true }).click()
+      await expect(main.locator('.session-card')).toHaveCount(1)
+      await expect(mini.locator('.mini-session')).toHaveCount(1)
+      assert.equal(
+        await main.evaluate(() =>
+          JSON.parse(localStorage.getItem('pulse.demo.sessions.v1')).sessions.some(
+            (session) => session.source === 'vscode',
+          ),
+        ),
+        false,
+      )
+
+      await main.getByRole('button', { name: 'Close session details', exact: true }).click()
+      await main.getByRole('button', { name: 'Refresh', exact: true }).click()
+      await expect(main.locator('.inspector')).toHaveCount(0)
+
+      rmSync(filename)
+      await main.getByRole('button', { name: 'Refresh', exact: true }).click()
+      await expect(main.locator('.session-card')).toHaveCount(0)
+      await expect(main.locator('.source-summary')).toContainText('No Copilot transcripts found.')
+      assert.deepEqual(errors, [])
+    } finally {
+      if (application) await application.close()
+      rmSync(temporary, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    }
+  },
+)

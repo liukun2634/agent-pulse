@@ -801,7 +801,8 @@ h1 {
   background: #f8ece8;
   color: #a26d55;
 }
-.status-badge.disconnected {
+.status-badge.disconnected,
+.status-badge.unknown {
   background: #edefec;
   color: #75876c;
 }
@@ -932,6 +933,59 @@ h1 {
   border: 1px solid #e1e9d6;
   padding: 3px 4px;
   border-radius: 3px;
+}
+.source-switch {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px;
+  gap: 3px;
+}
+.source-switch button {
+  display: inline-flex;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 8px;
+  font-size: 11px;
+  border-radius: 3px;
+  color: #69756e;
+}
+.source-switch button[aria-pressed='true'] {
+  background: #e8efeb;
+  color: #345c48;
+}
+.source-summary {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding: 0 0 14px;
+  margin-bottom: 18px;
+  color: #5b7167;
+  font-size: 12px;
+}
+.source-error,
+.source-unavailable {
+  color: #92621d;
+}
+.source-message {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #69756e;
+  overflow-wrap: anywhere;
+}
+.mini-sessions > .source-message {
+  padding: 12px;
+}
+.rail-status-unknown {
+  background: #8a9290;
 }
 .inspector h2 {
   font:

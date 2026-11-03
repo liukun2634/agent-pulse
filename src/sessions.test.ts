@@ -6,6 +6,7 @@ import {
   elapsed,
   filterSessions,
   formatDuration,
+  idleTime,
   parseSessions,
   serializeSessions,
 } from './sessions.ts'
@@ -38,6 +39,16 @@ test('waiting is not completed until execution resumes', () => {
   assert.equal(resumed[2].finishedAt, null)
 })
 
+test('live sessions cannot be mutated by demo controls and unknown needs attention', () => {
+  const sessions = createDemoSessions(now)
+  sessions[0].source = 'vscode'
+  assert.equal(changeStatus(sessions, '014', 'completed', now), sessions)
+  sessions[0].status = 'unknown'
+  assert.ok(
+    filterSessions(sessions, '', 'attention', 'all').some((session) => session.id === '014'),
+  )
+})
+
 test('retry resets the failed round timer', () => {
   const retried = changeStatus(createDemoSessions(now), '009', 'running', now)
   assert.equal(retried[5].startedAt, now)
@@ -68,4 +79,14 @@ test('duration formatting is stable at minute and hour boundaries', () => {
   assert.equal(formatDuration(-1000), '00:00')
   assert.equal(formatDuration(61000), '01:01')
   assert.equal(formatDuration(3600000), '1:00:00')
+})
+
+test('idle duration grows even after completion and resets on new activity', () => {
+  const session = { ...createDemoSessions(now)[3], updatedAt: now }
+  assert.equal(idleTime(session, now), '00:00')
+  assert.equal(idleTime(session, now + 65000), '01:05')
+  assert.equal(idleTime(session, now + 3665000), '1:01:05')
+  assert.equal(elapsed(session, now + 65000), elapsed(session, now))
+  assert.equal(idleTime({ ...session, updatedAt: now + 65000 }, now + 66000), '00:01')
+  assert.equal(idleTime(session, now - 1000), '00:00')
 })

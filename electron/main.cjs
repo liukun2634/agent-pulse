@@ -7,10 +7,12 @@ const {
   Notification,
   screen,
   session,
+  shell,
   Tray,
 } = require('electron')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
+const { createVSCodeSource } = require('./vscode-sessions.cjs')
 
 const root = path.join(__dirname, '..')
 const entry = path.join(root, 'dist', 'index.html')
@@ -25,6 +27,49 @@ let quitting = false
 let windowMode = 'workspace'
 let miniState = { collapsed: false, edge: 'right' }
 let expandedMiniSize = [360, 600]
+const vscodeSource = createVSCodeSource(
+  process.env.PULSE_VSCODE_STORAGE ||
+    path.join(app.getPath('appData'), 'Code', 'User', 'workspaceStorage'),
+  process.env.PULSE_VSCODE_SCHEME,
+)
+let feed = {
+  source: testMode && !process.env.PULSE_VSCODE_STORAGE ? 'demo' : 'vscode',
+  state: 'connecting',
+  message: 'Reading local Copilot transcripts...',
+  sessions: [],
+  scannedAt: null,
+  revision: 0,
+}
+let feedTimer
+let scanning = false
+let sourceGeneration = 0
+
+function publishFeed(next) {
+  feed = { ...next, revision: feed.revision + 1 }
+  for (const window of windows) window.webContents.send('pulse:session-feed', feed)
+}
+
+async function refreshFeed(force = false) {
+  if (scanning || feed.source !== 'vscode') return feed
+  scanning = true
+  const generation = sourceGeneration
+  try {
+    const next = await vscodeSource.scan(Date.now(), { force })
+    if (generation === sourceGeneration) publishFeed(next)
+  } catch {
+    if (generation === sourceGeneration)
+      publishFeed({
+        source: 'vscode',
+        state: 'error',
+        message: 'VS Code scan failed.',
+        sessions: [],
+        scannedAt: Date.now(),
+      })
+  } finally {
+    scanning = false
+  }
+  return feed
+}
 
 app.setName('Pulse')
 app.setAppUserModelId('dev.pulse.agent-monitor')
@@ -203,6 +248,41 @@ function trustedWindow(event) {
 }
 
 ipcMain.handle('pulse:get-pinned', (event) => trustedWindow(event).isAlwaysOnTop())
+ipcMain.handle('pulse:get-session-feed', (event) => {
+  trustedWindow(event)
+  return feed
+})
+ipcMain.handle('pulse:set-session-source', (event, source) => {
+  trustedWindow(event)
+  if (!['demo', 'vscode'].includes(source)) throw new TypeError('Invalid session source.')
+  if (source !== feed.source) {
+    sourceGeneration++
+    publishFeed({
+      source,
+      state: source === 'demo' ? 'demo' : 'connecting',
+      message: source === 'demo' ? 'Sample sessions' : 'Reading local Copilot transcripts...',
+      sessions: [],
+      scannedAt: null,
+    })
+  }
+  return refreshFeed(true)
+})
+ipcMain.handle('pulse:refresh-sessions', (event) => {
+  trustedWindow(event)
+  return refreshFeed(true)
+})
+ipcMain.handle('pulse:open-vscode', async (event, id) => {
+  trustedWindow(event)
+  if (
+    feed.source !== 'vscode' ||
+    typeof id !== 'string' ||
+    !feed.sessions.some((item) => item.id === id)
+  )
+    throw new TypeError('Unknown VS Code session.')
+  const uri = vscodeSource.workspaceUri(id)
+  if (!uri) throw new Error('The workspace is no longer available.')
+  await shell.openExternal(uri)
+})
 ipcMain.handle('pulse:set-pinned', (event, pinned) => {
   if (typeof pinned !== 'boolean') throw new TypeError('Expected a boolean.')
   const window = trustedWindow(event)
@@ -233,7 +313,7 @@ ipcMain.handle('pulse:dock-mini', (event, edge) => {
 })
 ipcMain.handle('pulse:open-workspace', (event, sessionId) => {
   trustedWindow(event)
-  if (sessionId !== undefined && (typeof sessionId !== 'string' || sessionId.length > 100))
+  if (sessionId !== undefined && (typeof sessionId !== 'string' || sessionId.length > 240))
     throw new TypeError('Invalid session ID.')
   showMain(sessionId)
 })
@@ -282,10 +362,14 @@ else {
     Menu.setApplicationMenu(null)
     if (!testMode) createTray()
     createMain()
+    void refreshFeed()
+    feedTimer = setInterval(() => void refreshFeed(), 2000)
   })
   app.on('activate', () => showMain())
   app.on('before-quit', () => {
     quitting = true
+    clearInterval(feedTimer)
+    vscodeSource.close()
   })
   app.on('window-all-closed', () => {
     if (!tray) app.quit()

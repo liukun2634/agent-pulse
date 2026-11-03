@@ -1,6 +1,17 @@
+import type { Session } from './sessions'
+
 export {}
 
 declare global {
+  interface PulseSessionFeed {
+    source: 'demo' | 'vscode'
+    state: 'demo' | 'connecting' | 'connected' | 'empty' | 'unavailable' | 'error'
+    message: string
+    sessions: Session[]
+    scannedAt: number | null
+    revision: number
+  }
+
   interface PulseMiniState {
     collapsed: boolean
     edge: 'left' | 'right'
@@ -8,6 +19,11 @@ declare global {
 
   interface Window {
     pulse?: {
+      getSessionFeed: () => Promise<PulseSessionFeed>
+      setSessionSource: (source: 'demo' | 'vscode') => Promise<PulseSessionFeed>
+      refreshSessions: () => Promise<PulseSessionFeed>
+      openVSCode: (id: string) => Promise<void>
+      onSessionFeed: (listener: (feed: PulseSessionFeed) => void) => () => void
       getPinned: () => Promise<boolean>
       setPinned: (pinned: boolean) => Promise<boolean>
       openMini: () => Promise<void>

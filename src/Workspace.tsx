@@ -52,6 +52,7 @@ import {
   createDemoSessions,
   elapsed,
   filterSessions,
+  idleTime,
   parseSessions,
   providers,
   relativeTime,
@@ -253,13 +254,20 @@ function SessionCard({
         <ProviderIcon provider={session.provider} size={14} />
         <span>{providers[session.provider].name}</span>
         <span className="separator">/</span>
-        <span className="session-number">#{session.id}</span>
+        <span className="session-number" title={session.id}>
+          #{session.id.split(':').at(-1)?.slice(0, 8)}
+        </span>
       </div>
       <div className="session-card-bottom">
         <StatusBadge status={session.status} />
-        <span className="duration">
+        <span
+          className="duration"
+          title={
+            session.source === 'vscode' ? 'Time since last transcript activity' : 'Elapsed time'
+          }
+        >
           <Clock3 size={12} />
-          {elapsed(session, now)}
+          {session.source === 'vscode' ? `Idle ${idleTime(session, now)}` : elapsed(session, now)}
         </span>
       </div>
     </button>
@@ -267,7 +275,16 @@ function SessionCard({
 }
 
 function Workspace() {
-  const [sessions, setSessions] = useState(initialSessions)
+  const [sessions, setSessions] = useState<Session[]>(() => (desktop ? [] : initialSessions()))
+  const [feed, setFeed] = useState<PulseSessionFeed>({
+    source: desktop ? 'vscode' : 'demo',
+    state: desktop ? 'connecting' : 'demo',
+    message: desktop ? 'Reading local Copilot transcripts...' : 'Sample sessions',
+    sessions: [],
+    scannedAt: null,
+    revision: -1,
+  })
+  const live = feed.source === 'vscode'
   const [preferences, setPreferences] = useState(initialPreferences)
   const [selectedId, setSelectedId] = useState<string | null>('014')
   const [filter, setFilter] = useState<SessionFilter>('all')
@@ -287,7 +304,140 @@ function Workspace() {
   const audioRef = useRef<AudioContext | null>(null)
   const miniRef = useRef<Window | null>(null)
 
+  const receiveFeed = useEffectEvent((incoming: PulseSessionFeed) => {
+    if (incoming.revision <= feed.revision) return
+    const sourceChanged = incoming.source !== feed.source
+    if (sourceChanged) {
+      setSimulatingId(null)
+      setFilter('all')
+      setProvider('all')
+      setQuery('')
+      setToast(null)
+    }
+    if (incoming.source === 'vscode') {
+      const changes =
+        !sourceChanged && feed.scannedAt !== null
+          ? incoming.sessions.filter(
+              (item) =>
+                ['waiting', 'completed', 'failed'].includes(item.status) &&
+                (sessions.some(
+                  (previous) => previous.id === item.id && previous.status !== item.status,
+                ) ||
+                  (item.status === 'waiting' &&
+                    !sessions.some((previous) => previous.id === item.id))),
+            )
+          : []
+      const changed = changes[0]
+      if (changed) {
+        const title =
+          changed.status === 'waiting'
+            ? 'Input needed in VS Code'
+            : changed.status === 'completed'
+              ? 'Assistant reply finished'
+              : 'Session reported an error'
+        setToast({
+          title,
+          detail:
+            changes.length > 1
+              ? `${changed.project} + ${changes.length - 1} other sessions`
+              : changed.project,
+          sessionId: changed.id,
+          tone: changed.status === 'completed' ? 'success' : 'info',
+        })
+        if (!miniMode && preferences.notifications)
+          for (const item of changes)
+            void desktop
+              ?.notify({ title: statusLabels[item.status], body: `${item.project}: ${item.task}` })
+              .catch(() => {})
+        if (!miniMode && preferences.sound) playSound()
+      }
+      setSessions(incoming.sessions)
+      if (
+        sourceChanged ||
+        feed.scannedAt === null ||
+        (selectedId !== null && !incoming.sessions.some((item) => item.id === selectedId))
+      )
+        setSelectedId(incoming.sessions[0]?.id ?? null)
+    } else if (sourceChanged || feed.revision === -1) {
+      setSessions(initialSessions())
+      setSelectedId('014')
+    }
+    setFeed(incoming)
+  })
+
+  useEffect(() => {
+    if (!desktop) return
+    let active = true
+    const accept = (incoming: PulseSessionFeed) => {
+      if (active) receiveFeed(incoming)
+    }
+    const unsubscribe = desktop.onSessionFeed(accept)
+    void desktop
+      .getSessionFeed()
+      .then(accept)
+      .catch(() => {
+        if (active)
+          setFeed((current) => ({
+            ...current,
+            state: 'error',
+            message: 'Desktop session bridge is unavailable.',
+          }))
+      })
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }, [])
+
+  function playSound() {
+    if (!audioRef.current || audioRef.current.state !== 'running') return
+    const audio = audioRef.current
+    const oscillator = audio.createOscillator()
+    const gain = audio.createGain()
+    oscillator.connect(gain)
+    gain.connect(audio.destination)
+    oscillator.frequency.setValueAtTime(660, audio.currentTime)
+    oscillator.frequency.setValueAtTime(880, audio.currentTime + 0.13)
+    gain.gain.setValueAtTime(0.06, audio.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.45)
+    oscillator.start()
+    oscillator.stop(audio.currentTime + 0.45)
+  }
+
+  async function chooseSource(source: 'vscode' | 'demo') {
+    try {
+      await desktop?.setSessionSource(source)
+    } catch {
+      setToast({ title: 'Source could not be changed', detail: 'Please try again.', tone: 'info' })
+    }
+  }
+
+  async function refreshSessions() {
+    try {
+      await desktop?.refreshSessions()
+    } catch {
+      setToast({
+        title: 'Refresh failed',
+        detail: 'The local session bridge is unavailable.',
+        tone: 'info',
+      })
+    }
+  }
+
+  async function openVSCode(id: string) {
+    try {
+      await desktop?.openVSCode(id)
+    } catch {
+      setToast({
+        title: 'VS Code could not be opened',
+        detail: 'The workspace or VS Code URL handler is unavailable.',
+        tone: 'info',
+      })
+    }
+  }
+
   const receiveSessions = useEffectEvent((incoming: Session[]) => {
+    if (live) return
     if (miniMode) {
       const finished = incoming.find(
         (item) =>
@@ -311,12 +461,13 @@ function Workspace() {
   }, [])
 
   useEffect(() => {
+    if (live) return
     try {
       localStorage.setItem(STORAGE_KEY, serializeSessions(sessions))
     } catch {
       reportStorageFailure()
     }
-  }, [sessions])
+  }, [sessions, live])
 
   useEffect(() => {
     try {
@@ -371,19 +522,7 @@ function Workspace() {
         sessionId: id,
         tone: 'success',
       })
-      if (preferences.sound && audioRef.current) {
-        const audio = audioRef.current
-        const oscillator = audio.createOscillator()
-        const gain = audio.createGain()
-        oscillator.connect(gain)
-        gain.connect(audio.destination)
-        oscillator.frequency.setValueAtTime(660, audio.currentTime)
-        oscillator.frequency.setValueAtTime(880, audio.currentTime + 0.13)
-        gain.gain.setValueAtTime(0.06, audio.currentTime)
-        gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.45)
-        oscillator.start()
-        oscillator.stop(audio.currentTime + 0.45)
-      }
+      if (preferences.sound) playSound()
       if (preferences.notifications) {
         if (desktop)
           void desktop.notify({ title: `${session.project} completed`, body: session.task })
@@ -411,7 +550,7 @@ function Workspace() {
   const selected = sessions.find((session) => session.id === selectedId)
   const running = sessions.filter((session) => session.status === 'running')
   const attention = sessions.filter((session) =>
-    ['waiting', 'failed', 'disconnected'].includes(session.status),
+    ['waiting', 'failed', 'disconnected', 'unknown'].includes(session.status),
   )
   const completed = sessions.filter((session) => session.status === 'completed')
   const visible = filterSessions(sessions, query, filter, provider).filter(
@@ -511,7 +650,7 @@ function Workspace() {
   }, [])
 
   function startDemo(id?: string) {
-    if (simulatingId) return
+    if (live || simulatingId) return
     if (preferences.sound) {
       audioRef.current ??= new AudioContext()
       void audioRef.current.resume()
@@ -530,6 +669,7 @@ function Workspace() {
   }
 
   function resetDemo() {
+    if (live) return
     setSimulatingId(null)
     setSessions(createDemoSessions())
     setSelectedId('014')
@@ -582,7 +722,7 @@ function Workspace() {
       </div>
       {toast.sessionId && (
         <IconButton
-          label="View completed session"
+          label={live ? 'View session' : 'View completed session'}
           onClick={() => {
             if (miniMode) openWorkspace(toast.sessionId)
             setSelectedId(toast.sessionId!)
@@ -674,7 +814,9 @@ function Workspace() {
           <IconButton label="Expand workspace" onClick={expandWorkspace}>
             <Maximize2 size={16} />
           </IconButton>
-          <span className="rail-demo">DEMO</span>
+          <span className="rail-demo" title={feed.message}>
+            {live ? 'CODE' : 'DEMO'}
+          </span>
         </footer>
       </div>
     )
@@ -684,7 +826,9 @@ function Workspace() {
       <div className="mini-app">
         <header className="mini-header app-drag">
           <Brand compact />
-          <span className="mini-demo">DEMO</span>
+          <span className="mini-demo" title={feed.message}>
+            {live ? 'VS CODE' : 'DEMO'}
+          </span>
           <div className="app-no-drag mini-window-actions">
             <IconButton label="Collapse sidebar" onClick={() => void toggleCollapsed()}>
               <PanelRightClose size={16} />
@@ -723,6 +867,11 @@ function Workspace() {
           </span>
         </div>
         <div className="mini-sessions">
+          {live && feed.state !== 'connected' && (
+            <p className="source-message" role="status">
+              {feed.message}
+            </p>
+          )}
           {sessions
             .filter((session) => preferences.showCompleted || session.status !== 'completed')
             .map((session) => (
@@ -740,7 +889,9 @@ function Workspace() {
                   <StatusBadge status={session.status} />
                 </span>
                 <span className="mini-session-end">
-                  <span>{elapsed(session, now)}</span>
+                  <span title={live ? 'Time since last transcript activity' : 'Elapsed time'}>
+                    {live ? `Idle ${idleTime(session, now)}` : elapsed(session, now)}
+                  </span>
                   <ArrowUpRight size={13} />
                 </span>
               </button>
@@ -815,7 +966,7 @@ function Workspace() {
           </button>
         </nav>
         <div className="nav-caption agents-caption">
-          AGENTS <span>DEMO</span>
+          AGENTS <span>{live ? 'LOCAL' : 'DEMO'}</span>
         </div>
         <nav className="agent-nav" aria-label="Filter by agent">
           {(Object.keys(providers) as Provider[]).map((agent) => (
@@ -838,8 +989,8 @@ function Workspace() {
             <Radio size={18} />
           </span>
           <div>
-            <strong>Local preview</strong>
-            <span>No agents connected</span>
+            <strong>{live ? 'VS Code / Copilot' : 'Local preview'}</strong>
+            <span>{live ? feed.message : 'No agents connected'}</span>
           </div>
           <span className="neutral-dot" />
         </div>
@@ -848,7 +999,7 @@ function Workspace() {
             <Settings2 size={17} />
             <span>Settings</span>
           </button>
-          <button onClick={resetDemo}>
+          <button onClick={resetDemo} disabled={live}>
             <RotateCcw size={16} />
             <span>Reset demo</span>
           </button>
@@ -876,8 +1027,8 @@ function Workspace() {
           </div>
           <div className="topbar-actions">
             <span className="demo-badge">
-              <FlaskConical size={12} />
-              Demo data
+              {live ? <Radio size={12} /> : <FlaskConical size={12} />}
+              {live ? 'Local transcripts' : 'Demo data'}
             </span>
             <span className="topbar-divider" />
             <IconButton
@@ -923,11 +1074,23 @@ function Workspace() {
               </h1>
               <p>
                 {view === 'activity'
-                  ? `${allEvents.length} events across your sample sessions`
+                  ? `${allEvents.length} events across your ${live ? 'VS Code' : 'sample'} sessions`
                   : `${running.length} in progress. ${attention.length} need your attention.`}
               </p>
             </div>
             <div className="heading-actions">
+              {desktop && (
+                <div className="source-switch" role="group" aria-label="Session source">
+                  <button aria-pressed={live} onClick={() => void chooseSource('vscode')}>
+                    <Monitor size={14} />
+                    VS Code
+                  </button>
+                  <button aria-pressed={!live} onClick={() => void chooseSource('demo')}>
+                    <FlaskConical size={14} />
+                    Demo
+                  </button>
+                </div>
+              )}
               <button
                 className="button button-secondary filter-settings"
                 aria-label="Display settings"
@@ -937,18 +1100,29 @@ function Workspace() {
               </button>
               <button
                 className="button button-primary"
-                onClick={() => startDemo()}
-                disabled={!!simulatingId}
+                onClick={() => (live ? void refreshSessions() : startDemo())}
+                disabled={live ? feed.state === 'connecting' : !!simulatingId}
               >
-                {simulatingId ? (
+                {live ? (
+                  <RotateCcw size={15} />
+                ) : simulatingId ? (
                   <LoaderCircle size={15} className="spin" />
                 ) : (
                   <Play size={14} fill="currentColor" />
                 )}
-                <span>{simulatingId ? 'Demo running' : 'Run demo'}</span>
+                <span>{live ? 'Refresh' : simulatingId ? 'Demo running' : 'Run demo'}</span>
               </button>
             </div>
           </div>
+
+          {live && (
+            <div className={`source-summary source-${feed.state}`} role="status">
+              <span>{feed.message}</span>
+              <span>
+                {feed.scannedAt ? `Checked ${relativeTime(feed.scannedAt, now)}` : 'Connecting'}
+              </span>
+            </div>
+          )}
 
           <div className="stats-strip">
             {[
@@ -1005,6 +1179,8 @@ function Workspace() {
                       'to review'
                     ) : stat.filter === 'completed' ? (
                       'this workspace'
+                    ) : live ? (
+                      'VS Code / Copilot'
                     ) : (
                       'across 3 agents'
                     )}
@@ -1104,7 +1280,7 @@ function Workspace() {
                 {visible.length === 0 && (
                   <div className="empty-state">
                     <Inbox size={29} strokeWidth={1.4} />
-                    <h3>No matching sessions</h3>
+                    <h3>{live && sessions.length === 0 ? feed.message : 'No matching sessions'}</h3>
                     <button
                       className="button button-secondary"
                       onClick={() => {
@@ -1124,7 +1300,11 @@ function Workspace() {
                   </span>
                   <span>
                     <ShieldCheck size={12} />
-                    {storageUnavailable ? 'Storage unavailable' : 'Stored on this device'}
+                    {live
+                      ? 'Read locally / not cached'
+                      : storageUnavailable
+                        ? 'Storage unavailable'
+                        : 'Stored on this device'}
                   </span>
                 </div>
               </section>
@@ -1143,15 +1323,17 @@ function Workspace() {
                     </span>
                     <div>
                       <strong>{providers[selected.provider].name}</strong>
-                      <span>
+                      <span title={selected.id}>
                         {providers[selected.provider].surface}
-                        <span className="separator">/</span>#{selected.id}
+                        <span className="separator">/</span>#
+                        {selected.id.split(':').at(-1)?.slice(0, 8)}
                       </span>
                     </div>
-                    <span className="inspector-demo">DEMO</span>
+                    <span className="inspector-demo">{live ? 'LOCAL' : 'DEMO'}</span>
                   </div>
                   <h2>{selected.task}</h2>
                   <StatusBadge status={selected.status} />
+                  {live && <p className="source-message">{selected.statusDetail}</p>}
                   <dl className="session-facts">
                     <div>
                       <dt>
@@ -1179,10 +1361,21 @@ function Workspace() {
                         <FileCode2 size={13} />
                         Files touched
                       </dt>
-                      <dd>{selected.files} files</dd>
+                      <dd>{live ? 'Not reported' : `${selected.files} files`}</dd>
                     </div>
+                    {live && (
+                      <div>
+                        <dt>
+                          <Activity size={13} />
+                          Idle
+                        </dt>
+                        <dd className="mono" title={new Date(selected.updatedAt).toLocaleString()}>
+                          {idleTime(selected, now)}
+                        </dd>
+                      </div>
+                    )}
                   </dl>
-                  {selected.status === 'waiting' && (
+                  {!live && selected.status === 'waiting' && (
                     <div className="approval-banner">
                       <div>
                         <CirclePause size={15} />
@@ -1199,7 +1392,7 @@ function Workspace() {
                       </button>
                     </div>
                   )}
-                  {selected.status === 'failed' && (
+                  {!live && selected.status === 'failed' && (
                     <div className="failure-banner">
                       <TriangleAlert size={15} />
                       <div>
@@ -1246,18 +1439,20 @@ function Workspace() {
                     <button
                       className="button button-secondary open-session-button"
                       onClick={() =>
-                        setToast({
-                          title: 'Demo session',
-                          detail: 'No external agent window is connected.',
-                          tone: 'info',
-                        })
+                        live
+                          ? void openVSCode(selected.id)
+                          : setToast({
+                              title: 'Demo session',
+                              detail: 'No external agent window is connected.',
+                              tone: 'info',
+                            })
                       }
                     >
                       <SquareTerminal size={15} />
-                      Open session
+                      {live ? 'Open VS Code workspace' : 'Open session'}
                       <ArrowUpRight size={15} />
                     </button>
-                    {selected.status === 'running' && (
+                    {!live && selected.status === 'running' && (
                       <button
                         className="text-button"
                         disabled={!!simulatingId}
@@ -1283,7 +1478,7 @@ function Workspace() {
                 <h2>Recent events</h2>
                 <span className="demo-badge">
                   <FlaskConical size={12} />
-                  Demo events
+                  {live ? 'Local events' : 'Demo events'}
                 </span>
               </div>
               <div className="activity-list">
@@ -1325,7 +1520,7 @@ function Workspace() {
           <footer className="page-footer">
             <span>
               <span className="neutral-dot" />
-              Demo workspace
+              {live ? 'VS Code workspace' : 'Demo workspace'}
             </span>
             <span>
               pulse <span className="footer-slash">/</span> v0.1.0
@@ -1362,7 +1557,9 @@ function Workspace() {
                   </span>
                   <div>
                     <strong>System notifications</strong>
-                    <span>On session completion</span>
+                    <span>
+                      {live ? 'On input requests, replies and errors' : 'On session completion'}
+                    </span>
                   </div>
                   <Toggle
                     label="System notifications"
@@ -1381,7 +1578,13 @@ function Workspace() {
                   <Toggle
                     label="Completion sound"
                     checked={preferences.sound}
-                    onChange={(sound) => setPreferences((current) => ({ ...current, sound }))}
+                    onChange={(sound) => {
+                      if (sound) {
+                        audioRef.current ??= new AudioContext()
+                        void audioRef.current.resume()
+                      }
+                      setPreferences((current) => ({ ...current, sound }))
+                    }}
                   />
                 </div>
               </div>
@@ -1422,13 +1625,15 @@ function Workspace() {
               <div className="integration-status">
                 <Monitor size={18} />
                 <div>
-                  <strong>{desktop ? 'Desktop preview' : 'Browser preview'}</strong>
-                  <span>Demo data only. No agent adapter connected.</span>
+                  <strong>
+                    {live ? 'VS Code / Copilot' : desktop ? 'Desktop preview' : 'Browser preview'}
+                  </strong>
+                  <span>{live ? feed.message : 'Demo data only. No agent adapter connected.'}</span>
                 </div>
                 <span className="demo-badge">LOCAL</span>
               </div>
               <div className="dialog-footer">
-                <button className="text-button" onClick={resetDemo}>
+                <button className="text-button" onClick={resetDemo} disabled={live}>
                   <RotateCcw size={13} />
                   Reset demo
                 </button>
@@ -1476,7 +1681,7 @@ function Workspace() {
                   ))}
               </div>
               <div className="dialog-footer">
-                <span className="muted">Demo workspace</span>
+                <span className="muted">{live ? 'VS Code workspace' : 'Demo workspace'}</span>
                 <button className="button button-secondary" onClick={() => setModal(null)}>
                   Close
                 </button>

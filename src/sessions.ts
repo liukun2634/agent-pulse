@@ -1,5 +1,6 @@
 export type Provider = 'claude' | 'codex' | 'copilot'
-export type SessionStatus = 'running' | 'waiting' | 'completed' | 'failed' | 'disconnected'
+export type SessionStatus =
+  'running' | 'waiting' | 'completed' | 'failed' | 'disconnected' | 'unknown'
 export type SessionFilter = 'all' | 'running' | 'attention' | 'completed'
 
 export interface SessionEvent {
@@ -15,6 +16,8 @@ export interface Session {
   task: string
   branch: string
   provider: Provider
+  source?: 'vscode'
+  statusDetail?: string
   status: SessionStatus
   startedAt: number
   updatedAt: number
@@ -35,6 +38,7 @@ export const statusLabels: Record<SessionStatus, string> = {
   completed: 'Completed',
   failed: 'Failed',
   disconnected: 'Disconnected',
+  unknown: 'Status unknown',
 }
 
 export function createDemoSessions(now = Date.now()): Session[] {
@@ -175,6 +179,7 @@ const transitions: Record<SessionStatus, SessionStatus[]> = {
   completed: [],
   failed: ['running'],
   disconnected: ['running', 'failed'],
+  unknown: [],
 }
 
 export function changeStatus(
@@ -184,7 +189,8 @@ export function changeStatus(
   now = Date.now(),
 ): Session[] {
   const target = sessions.find((session) => session.id === id)
-  if (!target || !transitions[target.status].includes(status)) return sessions
+  if (!target || target.source === 'vscode' || !transitions[target.status].includes(status))
+    return sessions
 
   const messages: Record<SessionStatus, string> = {
     running: 'Execution resumed',
@@ -192,6 +198,7 @@ export function changeStatus(
     completed: 'Session completed',
     failed: 'Execution stopped with an error',
     disconnected: 'Connection lost',
+    unknown: 'Status is unknown',
   }
   return sessions.map((session) =>
     session.id !== id
@@ -237,7 +244,7 @@ export function filterSessions(
     const matchesStatus =
       filter === 'all' ||
       (filter === 'attention'
-        ? ['waiting', 'failed', 'disconnected'].includes(session.status)
+        ? ['waiting', 'failed', 'disconnected', 'unknown'].includes(session.status)
         : session.status === filter)
     return matchesText && matchesStatus && (provider === 'all' || provider === session.provider)
   })
@@ -253,6 +260,10 @@ export function formatDuration(milliseconds: number): string {
 
 export function elapsed(session: Session, now: number): string {
   return formatDuration((session.finishedAt ?? now) - session.startedAt)
+}
+
+export function idleTime(session: Session, now: number): string {
+  return formatDuration(now - session.updatedAt)
 }
 
 export function relativeTime(timestamp: number, now: number): string {

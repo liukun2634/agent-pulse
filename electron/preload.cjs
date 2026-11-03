@@ -1,6 +1,15 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('pulse', {
+  getSessionFeed: () => ipcRenderer.invoke('pulse:get-session-feed'),
+  setSessionSource: (source) => ipcRenderer.invoke('pulse:set-session-source', source),
+  refreshSessions: () => ipcRenderer.invoke('pulse:refresh-sessions'),
+  openVSCode: (id) => ipcRenderer.invoke('pulse:open-vscode', id),
+  onSessionFeed: (listener) => {
+    const handler = (_event, feed) => listener(feed)
+    ipcRenderer.on('pulse:session-feed', handler)
+    return () => ipcRenderer.removeListener('pulse:session-feed', handler)
+  },
   getPinned: () => ipcRenderer.invoke('pulse:get-pinned'),
   setPinned: (pinned) => ipcRenderer.invoke('pulse:set-pinned', pinned),
   openMini: () => ipcRenderer.invoke('pulse:open-mini'),
