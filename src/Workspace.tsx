@@ -1,0 +1,1493 @@
+import { useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from 'react'
+import type { ButtonHTMLAttributes, ReactNode } from 'react'
+import {
+  Activity,
+  ArrowUpRight,
+  Bell,
+  BellRing,
+  Check,
+  CheckCheck,
+  ChevronDown,
+  ChevronRight,
+  CircleCheck,
+  CircleDot,
+  CirclePause,
+  Clock3,
+  Code2,
+  Command,
+  FileCode2,
+  FlaskConical,
+  Folder,
+  GitBranch,
+  Inbox,
+  LayoutGrid,
+  List,
+  LoaderCircle,
+  Maximize2,
+  Minus,
+  Monitor,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+  PanelTop,
+  Pin,
+  PinOff,
+  Play,
+  Radio,
+  RotateCcw,
+  Search,
+  Settings2,
+  ShieldCheck,
+  SlidersHorizontal,
+  SquareTerminal,
+  TriangleAlert,
+  Volume2,
+  WifiOff,
+  X,
+} from 'lucide-react'
+import { SiClaude, SiGithubcopilot } from '@icons-pack/react-simple-icons'
+import {
+  changeStatus,
+  createDemoSessions,
+  elapsed,
+  filterSessions,
+  parseSessions,
+  providers,
+  relativeTime,
+  serializeSessions,
+  statusLabels,
+} from './sessions'
+import type { Provider, Session, SessionFilter, SessionStatus } from './sessions'
+import './workspace.css'
+
+const STORAGE_KEY = 'pulse.demo.sessions.v1'
+const SETTINGS_KEY = 'pulse.preferences.v1'
+const desktop = window.pulse
+const miniMode = new URLSearchParams(window.location.search).get('view') === 'mini'
+
+let storageFailed = false
+const storageListeners = new Set<() => void>()
+
+function subscribeStorageHealth(listener: () => void) {
+  storageListeners.add(listener)
+  return () => {
+    storageListeners.delete(listener)
+  }
+}
+
+function getStorageFailure() {
+  return storageFailed
+}
+
+function reportStorageFailure() {
+  if (storageFailed) return
+  storageFailed = true
+  storageListeners.forEach((listener) => listener())
+}
+
+interface Preferences {
+  notifications: boolean
+  sound: boolean
+  showCompleted: boolean
+}
+interface Toast {
+  title: string
+  detail: string
+  sessionId?: string
+  tone?: 'success' | 'info'
+}
+type Modal = 'settings' | 'notifications' | null
+
+function initialSessions() {
+  try {
+    return parseSessions(localStorage.getItem(STORAGE_KEY)) ?? createDemoSessions()
+  } catch {
+    return createDemoSessions()
+  }
+}
+
+function initialPreferences(): Preferences {
+  try {
+    const saved = JSON.parse(
+      localStorage.getItem(SETTINGS_KEY) ?? 'null',
+    ) as Partial<Preferences> | null
+    return {
+      notifications: saved?.notifications === true,
+      sound: saved?.sound === true,
+      showCompleted: saved?.showCompleted !== false,
+    }
+  } catch {
+    return { notifications: false, sound: false, showCompleted: true }
+  }
+}
+
+function Brand({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className={`brand ${compact ? 'brand-compact' : ''}`}>
+      <span className="brand-mark">
+        <Activity size={21} strokeWidth={2.2} />
+      </span>
+      <span>
+        pulse<span className="brand-period">.</span>
+      </span>
+      {!compact && <span className="version">BETA</span>}
+    </div>
+  )
+}
+
+function ProviderIcon({ provider, size = 17 }: { provider: Provider; size?: number }) {
+  return (
+    <span className={`provider-icon ${provider}`}>
+      {provider === 'claude' ? (
+        <SiClaude size={size} aria-hidden />
+      ) : provider === 'copilot' ? (
+        <SiGithubcopilot size={size} aria-hidden />
+      ) : (
+        <SquareTerminal size={size} aria-hidden />
+      )}
+    </span>
+  )
+}
+
+function StatusBadge({ status }: { status: SessionStatus }) {
+  const Icon =
+    status === 'running'
+      ? LoaderCircle
+      : status === 'waiting'
+        ? CirclePause
+        : status === 'completed'
+          ? CircleCheck
+          : status === 'disconnected'
+            ? WifiOff
+            : TriangleAlert
+  return (
+    <span className={`status-badge ${status}`}>
+      <Icon size={12} className={status === 'running' ? 'spin' : ''} />
+      {statusLabels[status]}
+    </span>
+  )
+}
+
+function IconButton({
+  label,
+  children,
+  className = '',
+  ...props
+}: {
+  label: string
+  children: ReactNode
+  className?: string
+} & ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button
+      type="button"
+      className={`icon-button ${className}`}
+      aria-label={label}
+      title={label}
+      {...props}
+    >
+      {children}
+    </button>
+  )
+}
+
+function Toggle({
+  checked,
+  onChange,
+  label,
+  disabled = false,
+}: {
+  checked: boolean
+  onChange: (value: boolean) => void
+  label: string
+  disabled?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      className={`toggle ${checked ? 'is-on' : ''}`}
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+    >
+      <span />
+    </button>
+  )
+}
+
+function SessionCard({
+  session,
+  selected,
+  now,
+  onSelect,
+  index,
+}: {
+  session: Session
+  selected: boolean
+  now: number
+  onSelect: () => void
+  index: number
+}) {
+  return (
+    <button
+      className={`session-card ${selected ? 'selected' : ''} session-${session.status}`}
+      onClick={onSelect}
+      aria-pressed={selected}
+      aria-label={`${session.project}: ${session.task}`}
+      style={{ animationDelay: `${index * 45}ms` }}
+    >
+      <div className="session-card-top">
+        <span className="project-name">
+          <span className={`project-glyph project-${session.project}`}>
+            <Folder size={14} />
+          </span>
+          {session.project}
+        </span>
+        <ArrowUpRight size={15} className="card-arrow" />
+      </div>
+      <h3>{session.task}</h3>
+      <div className="session-provider">
+        <ProviderIcon provider={session.provider} size={14} />
+        <span>{providers[session.provider].name}</span>
+        <span className="separator">/</span>
+        <span className="session-number">#{session.id}</span>
+      </div>
+      <div className="session-card-bottom">
+        <StatusBadge status={session.status} />
+        <span className="duration">
+          <Clock3 size={12} />
+          {elapsed(session, now)}
+        </span>
+      </div>
+    </button>
+  )
+}
+
+function Workspace() {
+  const [sessions, setSessions] = useState(initialSessions)
+  const [preferences, setPreferences] = useState(initialPreferences)
+  const [selectedId, setSelectedId] = useState<string | null>('014')
+  const [filter, setFilter] = useState<SessionFilter>('all')
+  const [provider, setProvider] = useState<Provider | 'all'>('all')
+  const [query, setQuery] = useState('')
+  const [view, setView] = useState<'sessions' | 'activity'>('sessions')
+  const [layout, setLayout] = useState<'grid' | 'list'>('grid')
+  const [modal, setModal] = useState<Modal>(null)
+  const [toast, setToast] = useState<Toast | null>(null)
+  const [pinned, setPinned] = useState(false)
+  const [miniState, setMiniState] = useState<PulseMiniState>({ collapsed: false, edge: 'right' })
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [simulatingId, setSimulatingId] = useState<string | null>(null)
+  const storageUnavailable = useSyncExternalStore(subscribeStorageHealth, getStorageFailure)
+  const [now, setNow] = useState(Date.now)
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const audioRef = useRef<AudioContext | null>(null)
+  const miniRef = useRef<Window | null>(null)
+
+  const receiveSessions = useEffectEvent((incoming: Session[]) => {
+    if (miniMode) {
+      const finished = incoming.find(
+        (item) =>
+          item.status === 'completed' &&
+          sessions.some((previous) => previous.id === item.id && previous.status !== 'completed'),
+      )
+      if (finished)
+        setToast({
+          title: 'Session complete',
+          detail: finished.project,
+          sessionId: finished.id,
+          tone: 'success',
+        })
+    }
+    setSessions(incoming)
+  })
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, serializeSessions(sessions))
+    } catch {
+      reportStorageFailure()
+    }
+  }, [sessions])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(preferences))
+    } catch {
+      reportStorageFailure()
+    }
+  }, [preferences])
+
+  useEffect(() => {
+    const receive = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEY) {
+        const incoming = parseSessions(event.newValue)
+        if (incoming) receiveSessions(incoming)
+      }
+      if (event.key === SETTINGS_KEY) setPreferences(initialPreferences())
+    }
+    window.addEventListener('storage', receive)
+    return () => window.removeEventListener('storage', receive)
+  }, [])
+
+  useEffect(() => {
+    if (!desktop) return
+    void desktop.getPinned().then(setPinned)
+    return desktop.onPinnedChange(setPinned)
+  }, [])
+
+  useEffect(() => {
+    if (!desktop || !miniMode) return
+    void desktop.getMiniState().then(setMiniState)
+    return desktop.onMiniStateChange(setMiniState)
+  }, [])
+
+  useEffect(() => {
+    if (modal) dialogRef.current?.showModal()
+    else dialogRef.current?.close()
+  }, [modal])
+
+  useEffect(() => {
+    if (!toast) return
+    const timer = window.setTimeout(() => setToast(null), 6500)
+    return () => window.clearTimeout(timer)
+  }, [toast])
+
+  const finishDemo = useEffectEvent((id: string) => {
+    const session = sessions.find((item) => item.id === id)
+    if (session?.status === 'running') {
+      setSessions((current) => changeStatus(current, id, 'completed'))
+      setToast({
+        title: 'Session complete',
+        detail: `${session.project} finished its demo task`,
+        sessionId: id,
+        tone: 'success',
+      })
+      if (preferences.sound && audioRef.current) {
+        const audio = audioRef.current
+        const oscillator = audio.createOscillator()
+        const gain = audio.createGain()
+        oscillator.connect(gain)
+        gain.connect(audio.destination)
+        oscillator.frequency.setValueAtTime(660, audio.currentTime)
+        oscillator.frequency.setValueAtTime(880, audio.currentTime + 0.13)
+        gain.gain.setValueAtTime(0.06, audio.currentTime)
+        gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.45)
+        oscillator.start()
+        oscillator.stop(audio.currentTime + 0.45)
+      }
+      if (preferences.notifications) {
+        if (desktop)
+          void desktop.notify({ title: `${session.project} completed`, body: session.task })
+        else if ('Notification' in window && Notification.permission === 'granted') {
+          const notification = new Notification(`${session.project} completed`, {
+            body: session.task,
+          })
+          notification.onclick = () => {
+            window.focus()
+            setSelectedId(id)
+            notification.close()
+          }
+        }
+      }
+    }
+    setSimulatingId(null)
+  })
+
+  useEffect(() => {
+    if (!simulatingId) return
+    const timer = window.setTimeout(() => finishDemo(simulatingId), 4500)
+    return () => window.clearTimeout(timer)
+  }, [simulatingId])
+
+  const selected = sessions.find((session) => session.id === selectedId)
+  const running = sessions.filter((session) => session.status === 'running')
+  const attention = sessions.filter((session) =>
+    ['waiting', 'failed', 'disconnected'].includes(session.status),
+  )
+  const completed = sessions.filter((session) => session.status === 'completed')
+  const visible = filterSessions(sessions, query, filter, provider).filter(
+    (session) => preferences.showCompleted || session.status !== 'completed',
+  )
+  const allEvents = sessions
+    .flatMap((session) => session.events.map((event) => ({ ...event, session })))
+    .sort((first, second) => second.at - first.at)
+
+  async function togglePin() {
+    if (!desktop) return
+    try {
+      setPinned(await desktop.setPinned(!pinned))
+    } catch {
+      setToast({ title: 'Window could not be pinned', detail: 'Please try again.', tone: 'info' })
+    }
+  }
+
+  function openMini() {
+    if (desktop) void desktop.openMini()
+    else {
+      const popup = window.open(
+        `${window.location.pathname}?view=mini`,
+        'pulse-mini',
+        'popup,width=410,height=580',
+      )
+      miniRef.current = popup
+      if (!popup)
+        setToast({
+          title: 'Popup blocked',
+          detail: 'Allow popups for this local preview.',
+          tone: 'info',
+        })
+    }
+  }
+
+  function openWorkspace(id?: string) {
+    if (id) setSelectedId(id)
+    if (desktop) void desktop.openWorkspace(id)
+    else if (window.opener && !window.opener.closed) {
+      if (id)
+        window.opener.postMessage({ type: 'pulse:select-session', id }, window.location.origin)
+      window.opener.focus()
+      window.close()
+    } else window.location.assign(window.location.pathname)
+  }
+
+  function expandWorkspace() {
+    if (desktop) void desktop.expandWorkspace()
+    else openWorkspace()
+  }
+
+  async function toggleCollapsed() {
+    if (desktop) {
+      try {
+        setMiniState(await desktop.setMiniCollapsed(!miniState.collapsed))
+      } catch {
+        setToast({
+          title: 'Window could not be resized',
+          detail: 'Please try again.',
+          tone: 'info',
+        })
+      }
+    } else setMiniState((current) => ({ ...current, collapsed: !current.collapsed }))
+  }
+
+  async function toggleDock() {
+    const edge = miniState.edge === 'right' ? 'left' : 'right'
+    if (desktop) {
+      try {
+        setMiniState(await desktop.dockMini(edge))
+      } catch {
+        setToast({ title: 'Window could not be docked', detail: 'Please try again.', tone: 'info' })
+      }
+    } else setMiniState((current) => ({ ...current, edge }))
+  }
+
+  useEffect(
+    () =>
+      desktop?.onSelectSession((id) => {
+        setSelectedId(id)
+        setView('sessions')
+      }),
+    [],
+  )
+
+  useEffect(() => {
+    const receive = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.source !== miniRef.current) return
+      if (event.data?.type === 'pulse:select-session' && typeof event.data.id === 'string') {
+        setSelectedId(event.data.id)
+        setView('sessions')
+      }
+    }
+    window.addEventListener('message', receive)
+    return () => window.removeEventListener('message', receive)
+  }, [])
+
+  function startDemo(id?: string) {
+    if (simulatingId) return
+    if (preferences.sound) {
+      audioRef.current ??= new AudioContext()
+      void audioRef.current.resume()
+    }
+    const target = id ? sessions.find((session) => session.id === id) : running[0]
+    if (target && target.status !== 'completed') {
+      if (target.status !== 'running')
+        setSessions((current) => changeStatus(current, target.id, 'running'))
+      setSimulatingId(target.id)
+      setSelectedId(target.id)
+    } else {
+      setSessions(createDemoSessions())
+      setSelectedId('014')
+      setSimulatingId('014')
+    }
+  }
+
+  function resetDemo() {
+    setSimulatingId(null)
+    setSessions(createDemoSessions())
+    setSelectedId('014')
+    setFilter('all')
+    setProvider('all')
+    setQuery('')
+    setToast({ title: 'Demo workspace reset', detail: 'Six fresh sample sessions.', tone: 'info' })
+  }
+
+  async function enableNotifications(enabled: boolean) {
+    if (enabled && !desktop) {
+      if (!('Notification' in window)) {
+        setToast({
+          title: 'System notifications unavailable',
+          detail: 'In-app completion alerts remain enabled.',
+          tone: 'info',
+        })
+        return
+      }
+      const permission = await Notification.requestPermission()
+      if (permission !== 'granted') {
+        setToast({
+          title: 'Notification permission not granted',
+          detail: 'In-app completion alerts remain enabled.',
+          tone: 'info',
+        })
+        return
+      }
+    }
+    setPreferences((current) => ({ ...current, notifications: enabled }))
+  }
+
+  function selectNavigation(
+    nextView: 'sessions' | 'activity',
+    nextProvider: Provider | 'all' = 'all',
+  ) {
+    setView(nextView)
+    setProvider(nextProvider)
+    setSidebarOpen(false)
+  }
+
+  const notificationToast = toast && (
+    <div className={`toast ${toast.tone ?? 'info'}`} role="status">
+      <span className="toast-symbol">
+        {toast.tone === 'success' ? <CheckCheck size={19} /> : <Bell size={18} />}
+      </span>
+      <div>
+        <strong>{toast.title}</strong>
+        <p>{toast.detail}</p>
+      </div>
+      {toast.sessionId && (
+        <IconButton
+          label="View completed session"
+          onClick={() => {
+            if (miniMode) openWorkspace(toast.sessionId)
+            setSelectedId(toast.sessionId!)
+            setView('sessions')
+            setToast(null)
+          }}
+        >
+          <ArrowUpRight size={17} />
+        </IconButton>
+      )}
+      <IconButton label="Dismiss notification" onClick={() => setToast(null)}>
+        <X size={15} />
+      </IconButton>
+    </div>
+  )
+
+  if (miniMode && miniState.collapsed)
+    return (
+      <div className={`mini-app mini-rail rail-${miniState.edge}`}>
+        <header className="rail-header app-drag">
+          <span className="brand-mark">
+            <Activity size={19} />
+          </span>
+        </header>
+        <div className="rail-counts">
+          <span title={`${running.length} in progress`}>
+            <span className="live-dot" />
+            {running.length}
+          </span>
+          <span title={`${attention.length} need attention`}>
+            <span className="attention-dot" />
+            {attention.length}
+          </span>
+        </div>
+        <nav className="rail-sessions" aria-label="Session shortcuts">
+          {sessions
+            .filter((item) => preferences.showCompleted || item.status !== 'completed')
+            .map((item) => (
+              <button
+                key={item.id}
+                className={`rail-session mini-${item.status}`}
+                title={`${item.project}: ${item.task}\n${statusLabels[item.status]}`}
+                aria-label={`Open ${item.project}: ${item.task}`}
+                onClick={() => openWorkspace(item.id)}
+              >
+                <ProviderIcon provider={item.provider} size={18} />
+                <span className={`rail-status rail-status-${item.status}`} />
+                <span className="rail-session-name">{item.project}</span>
+              </button>
+            ))}
+        </nav>
+        <footer className="rail-footer">
+          {toast?.sessionId && (
+            <IconButton
+              label={`Completed: ${toast.detail}`}
+              className="rail-completion"
+              onClick={() => openWorkspace(toast.sessionId)}
+            >
+              <CheckCheck size={17} />
+            </IconButton>
+          )}
+          <IconButton label="Expand sidebar" onClick={() => void toggleCollapsed()}>
+            <PanelRightOpen size={17} />
+          </IconButton>
+          <IconButton
+            label={miniState.edge === 'right' ? 'Dock left' : 'Dock right'}
+            onClick={() => void toggleDock()}
+          >
+            {miniState.edge === 'right' ? (
+              <PanelLeftOpen size={16} />
+            ) : (
+              <PanelRightOpen size={16} />
+            )}
+          </IconButton>
+          <IconButton
+            label={
+              desktop
+                ? pinned
+                  ? 'Unpin window'
+                  : 'Pin window'
+                : 'Pinning requires the desktop app'
+            }
+            disabled={!desktop}
+            className={pinned ? 'is-pinned' : ''}
+            onClick={() => void togglePin()}
+          >
+            {pinned ? <PinOff size={15} /> : <Pin size={15} />}
+          </IconButton>
+          <IconButton label="Expand workspace" onClick={expandWorkspace}>
+            <Maximize2 size={16} />
+          </IconButton>
+          <span className="rail-demo">DEMO</span>
+        </footer>
+      </div>
+    )
+
+  if (miniMode)
+    return (
+      <div className="mini-app">
+        <header className="mini-header app-drag">
+          <Brand compact />
+          <span className="mini-demo">DEMO</span>
+          <div className="app-no-drag mini-window-actions">
+            <IconButton label="Collapse sidebar" onClick={() => void toggleCollapsed()}>
+              <PanelRightClose size={16} />
+            </IconButton>
+            <IconButton
+              label={
+                desktop
+                  ? pinned
+                    ? 'Unpin window'
+                    : 'Pin window'
+                  : 'Pinning requires the desktop app'
+              }
+              disabled={!desktop}
+              className={pinned ? 'is-pinned' : ''}
+              onClick={() => void togglePin()}
+            >
+              {pinned ? <PinOff size={15} /> : <Pin size={15} />}
+            </IconButton>
+            <IconButton label="Expand workspace" onClick={expandWorkspace}>
+              <Maximize2 size={15} />
+            </IconButton>
+            {desktop && (
+              <IconButton label="Hide mini monitor" onClick={() => void desktop.hideMini()}>
+                <Minus size={16} />
+              </IconButton>
+            )}
+          </div>
+        </header>
+        <div className="mini-overview">
+          <span className="live-dot" />
+          <strong>
+            {running.length} {running.length === 1 ? 'session' : 'sessions'} in progress
+          </strong>
+          <span className="mini-clock">
+            {new Date(now).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+          </span>
+        </div>
+        <div className="mini-sessions">
+          {sessions
+            .filter((session) => preferences.showCompleted || session.status !== 'completed')
+            .map((session) => (
+              <button
+                key={session.id}
+                className={`mini-session mini-${session.status}`}
+                onClick={() => openWorkspace(session.id)}
+              >
+                <span className="mini-provider">
+                  <ProviderIcon provider={session.provider} size={20} />
+                </span>
+                <span className="mini-session-content">
+                  <strong>{session.project}</strong>
+                  <span>{session.task}</span>
+                  <StatusBadge status={session.status} />
+                </span>
+                <span className="mini-session-end">
+                  <span>{elapsed(session, now)}</span>
+                  <ArrowUpRight size={13} />
+                </span>
+              </button>
+            ))}
+        </div>
+        <footer className="mini-footer">
+          <button
+            onClick={() => void toggleDock()}
+            title={miniState.edge === 'right' ? 'Dock left' : 'Dock right'}
+          >
+            {miniState.edge === 'right' ? (
+              <PanelLeftOpen size={14} />
+            ) : (
+              <PanelRightOpen size={14} />
+            )}
+            {miniState.edge === 'right' ? 'Dock left' : 'Dock right'}
+          </button>
+          <button onClick={() => openWorkspace()}>
+            Open workspace <ArrowUpRight size={14} />
+          </button>
+        </footer>
+        {notificationToast}
+      </div>
+    )
+
+  return (
+    <div className="app-shell">
+      {sidebarOpen && (
+        <button
+          className="sidebar-backdrop"
+          aria-label="Close navigation"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+      <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''}`}>
+        <div className="sidebar-brand">
+          <Brand />
+          <IconButton
+            className="mobile-close"
+            label="Close navigation"
+            onClick={() => setSidebarOpen(false)}
+          >
+            <PanelLeftClose size={18} />
+          </IconButton>
+        </div>
+        <div className="workspace-switch">
+          <span className="workspace-avatar">
+            <Command size={17} />
+          </span>
+          <div>
+            <strong>Personal workspace</strong>
+            <span>Local environment</span>
+          </div>
+          <span className="workspace-online" />
+        </div>
+        <div className="nav-caption">WORKSPACE</div>
+        <nav className="primary-nav" aria-label="Workspace navigation">
+          <button
+            className={view === 'sessions' && provider === 'all' ? 'nav-active' : ''}
+            onClick={() => selectNavigation('sessions')}
+          >
+            <LayoutGrid size={17} />
+            <span>All sessions</span>
+            <span className="nav-count">{sessions.length}</span>
+          </button>
+          <button
+            className={view === 'activity' ? 'nav-active' : ''}
+            onClick={() => selectNavigation('activity')}
+          >
+            <Activity size={17} />
+            <span>Activity</span>
+          </button>
+        </nav>
+        <div className="nav-caption agents-caption">
+          AGENTS <span>DEMO</span>
+        </div>
+        <nav className="agent-nav" aria-label="Filter by agent">
+          {(Object.keys(providers) as Provider[]).map((agent) => (
+            <button
+              key={agent}
+              className={provider === agent && view === 'sessions' ? 'agent-active' : ''}
+              onClick={() => selectNavigation('sessions', agent)}
+            >
+              <ProviderIcon provider={agent} />
+              <span>{providers[agent].name}</span>
+              <span className="agent-count">
+                {sessions.filter((session) => session.provider === agent).length}
+              </span>
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-spacer" />
+        <div className="connection-status">
+          <span className="connection-symbol">
+            <Radio size={18} />
+          </span>
+          <div>
+            <strong>Local preview</strong>
+            <span>No agents connected</span>
+          </div>
+          <span className="neutral-dot" />
+        </div>
+        <nav className="bottom-nav" aria-label="Application settings">
+          <button onClick={() => setModal('settings')}>
+            <Settings2 size={17} />
+            <span>Settings</span>
+          </button>
+          <button onClick={resetDemo}>
+            <RotateCcw size={16} />
+            <span>Reset demo</span>
+          </button>
+        </nav>
+        <div className="sidebar-footer">
+          <span className="user-avatar">P</span>
+          <span>Personal</span>
+          <span className="local-label">ON DEVICE</span>
+        </div>
+      </aside>
+
+      <div className="main-shell">
+        <header className="topbar">
+          <div className="breadcrumbs">
+            <IconButton
+              className="mobile-menu"
+              label="Open navigation"
+              onClick={() => setSidebarOpen(true)}
+            >
+              <PanelLeftOpen size={19} />
+            </IconButton>
+            <span>Workspace</span>
+            <ChevronRight size={13} />
+            <strong>{view === 'activity' ? 'Activity' : 'Overview'}</strong>
+          </div>
+          <div className="topbar-actions">
+            <span className="demo-badge">
+              <FlaskConical size={12} />
+              Demo data
+            </span>
+            <span className="topbar-divider" />
+            <IconButton
+              label="Notifications"
+              className="notification-button"
+              onClick={() => setModal('notifications')}
+            >
+              <Bell size={18} />
+              {attention.length > 0 && <span className="notification-dot" />}
+            </IconButton>
+            <IconButton
+              label={
+                desktop
+                  ? pinned
+                    ? 'Unpin window'
+                    : 'Pin window'
+                  : 'Pinning requires the desktop app'
+              }
+              disabled={!desktop}
+              className={pinned ? 'is-pinned' : ''}
+              onClick={() => void togglePin()}
+            >
+              {pinned ? <PinOff size={17} /> : <Pin size={17} />}
+            </IconButton>
+            <button className="button button-secondary mini-button" onClick={openMini}>
+              <PanelTop size={15} />
+              <span>Mini monitor</span>
+              <ArrowUpRight size={13} />
+            </button>
+          </div>
+        </header>
+
+        <main className="main-content">
+          <div className="page-heading">
+            <div>
+              <div className="eyebrow">
+                <span className="live-dot" />
+                YOUR WORKSPACE
+              </div>
+              <h1>
+                {view === 'activity' ? 'Activity' : 'Sessions'}
+                <span className="heading-dot">.</span>
+              </h1>
+              <p>
+                {view === 'activity'
+                  ? `${allEvents.length} events across your sample sessions`
+                  : `${running.length} in progress. ${attention.length} need your attention.`}
+              </p>
+            </div>
+            <div className="heading-actions">
+              <button
+                className="button button-secondary filter-settings"
+                aria-label="Display settings"
+                onClick={() => setModal('settings')}
+              >
+                <SlidersHorizontal size={15} />
+              </button>
+              <button
+                className="button button-primary"
+                onClick={() => startDemo()}
+                disabled={!!simulatingId}
+              >
+                {simulatingId ? (
+                  <LoaderCircle size={15} className="spin" />
+                ) : (
+                  <Play size={14} fill="currentColor" />
+                )}
+                <span>{simulatingId ? 'Demo running' : 'Run demo'}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="stats-strip">
+            {[
+              {
+                label: 'Total sessions',
+                value: sessions.length,
+                Icon: Code2,
+                tone: 'neutral',
+                filter: 'all' as const,
+              },
+              {
+                label: 'In progress',
+                value: running.length,
+                Icon: CircleDot,
+                tone: 'green',
+                filter: 'running' as const,
+              },
+              {
+                label: 'Needs attention',
+                value: attention.length,
+                Icon: CirclePause,
+                tone: 'amber',
+                filter: 'attention' as const,
+              },
+              {
+                label: 'Completed',
+                value: completed.length,
+                Icon: CircleCheck,
+                tone: 'blue',
+                filter: 'completed' as const,
+              },
+            ].map((stat) => (
+              <button
+                key={stat.label}
+                className={`stat stat-${stat.tone}`}
+                onClick={() => {
+                  setView('sessions')
+                  setFilter(stat.filter)
+                }}
+              >
+                <div className="stat-label">
+                  <stat.Icon size={15} />
+                  <span>{stat.label}</span>
+                </div>
+                <div className="stat-value">
+                  {String(stat.value).padStart(2, '0')}
+                  <span className="stat-detail">
+                    {stat.filter === 'running' ? (
+                      <>
+                        <span className="tiny-pulse" />
+                        working
+                      </>
+                    ) : stat.filter === 'attention' ? (
+                      'to review'
+                    ) : stat.filter === 'completed' ? (
+                      'this workspace'
+                    ) : (
+                      'across 3 agents'
+                    )}
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {view === 'sessions' ? (
+            <div className={`workspace-body ${selected ? '' : 'no-inspector'}`}>
+              <section className="sessions-section" aria-label="Sessions">
+                <div className="session-tabs" role="tablist" aria-label="Session status">
+                  {(
+                    [
+                      { id: 'all', label: 'All sessions', count: sessions.length },
+                      { id: 'running', label: 'In progress', count: running.length },
+                      { id: 'attention', label: 'Attention', count: attention.length },
+                      { id: 'completed', label: 'Completed', count: completed.length },
+                    ] as const
+                  ).map((tab) => (
+                    <button
+                      key={tab.id}
+                      role="tab"
+                      aria-selected={filter === tab.id}
+                      className={filter === tab.id ? 'tab-active' : ''}
+                      onClick={() => setFilter(tab.id)}
+                    >
+                      {tab.label}
+                      <span>{tab.count}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="session-toolbar">
+                  <label className="search-box">
+                    <Search size={15} />
+                    <input
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      placeholder="Search sessions..."
+                      aria-label="Search sessions"
+                    />
+                    {query && (
+                      <IconButton label="Clear search" onClick={() => setQuery('')}>
+                        <X size={13} />
+                      </IconButton>
+                    )}
+                  </label>
+                  <div className="toolbar-right">
+                    <label className="provider-select">
+                      <select
+                        value={provider}
+                        onChange={(event) => setProvider(event.target.value as Provider | 'all')}
+                        aria-label="Agent filter"
+                      >
+                        <option value="all">All agents</option>
+                        {(Object.keys(providers) as Provider[]).map((agent) => (
+                          <option key={agent} value={agent}>
+                            {providers[agent].name}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown size={12} />
+                    </label>
+                    <div className="view-toggle" aria-label="Session layout">
+                      <IconButton
+                        label="Grid view"
+                        aria-pressed={layout === 'grid'}
+                        className={layout === 'grid' ? 'view-active' : ''}
+                        onClick={() => setLayout('grid')}
+                      >
+                        <LayoutGrid size={14} />
+                      </IconButton>
+                      <IconButton
+                        label="List view"
+                        aria-pressed={layout === 'list'}
+                        className={layout === 'list' ? 'view-active' : ''}
+                        onClick={() => setLayout('list')}
+                      >
+                        <List size={16} />
+                      </IconButton>
+                    </div>
+                  </div>
+                </div>
+                <div className={`session-grid ${layout === 'list' ? 'list-layout' : ''}`}>
+                  {visible.map((session, index) => (
+                    <SessionCard
+                      key={session.id}
+                      session={session}
+                      selected={selectedId === session.id}
+                      now={now}
+                      index={index}
+                      onSelect={() => setSelectedId(session.id)}
+                    />
+                  ))}
+                </div>
+                {visible.length === 0 && (
+                  <div className="empty-state">
+                    <Inbox size={29} strokeWidth={1.4} />
+                    <h3>No matching sessions</h3>
+                    <button
+                      className="button button-secondary"
+                      onClick={() => {
+                        setQuery('')
+                        setFilter('all')
+                        setProvider('all')
+                        setPreferences((current) => ({ ...current, showCompleted: true }))
+                      }}
+                    >
+                      Clear filters
+                    </button>
+                  </div>
+                )}
+                <div className="list-footer">
+                  <span>
+                    {visible.length} of {sessions.length} sessions
+                  </span>
+                  <span>
+                    <ShieldCheck size={12} />
+                    {storageUnavailable ? 'Storage unavailable' : 'Stored on this device'}
+                  </span>
+                </div>
+              </section>
+
+              {selected && (
+                <aside className="inspector" aria-label="Session details">
+                  <div className="inspector-heading">
+                    <span>SESSION DETAILS</span>
+                    <IconButton label="Close session details" onClick={() => setSelectedId(null)}>
+                      <X size={15} />
+                    </IconButton>
+                  </div>
+                  <div className="inspector-identity">
+                    <span className={`large-provider ${selected.provider}`}>
+                      <ProviderIcon provider={selected.provider} size={24} />
+                    </span>
+                    <div>
+                      <strong>{providers[selected.provider].name}</strong>
+                      <span>
+                        {providers[selected.provider].surface}
+                        <span className="separator">/</span>#{selected.id}
+                      </span>
+                    </div>
+                    <span className="inspector-demo">DEMO</span>
+                  </div>
+                  <h2>{selected.task}</h2>
+                  <StatusBadge status={selected.status} />
+                  <dl className="session-facts">
+                    <div>
+                      <dt>
+                        <Folder size={13} />
+                        Project
+                      </dt>
+                      <dd>{selected.project}</dd>
+                    </div>
+                    <div>
+                      <dt>
+                        <GitBranch size={13} />
+                        Branch
+                      </dt>
+                      <dd title={selected.branch}>{selected.branch}</dd>
+                    </div>
+                    <div>
+                      <dt>
+                        <Clock3 size={13} />
+                        Elapsed
+                      </dt>
+                      <dd className="mono">{elapsed(selected, now)}</dd>
+                    </div>
+                    <div>
+                      <dt>
+                        <FileCode2 size={13} />
+                        Files touched
+                      </dt>
+                      <dd>{selected.files} files</dd>
+                    </div>
+                  </dl>
+                  {selected.status === 'waiting' && (
+                    <div className="approval-banner">
+                      <div>
+                        <CirclePause size={15} />
+                        <strong>Approval requested</strong>
+                      </div>
+                      <p>Update {selected.files} color token files</p>
+                      <button
+                        className="button button-approve"
+                        onClick={() => startDemo(selected.id)}
+                        disabled={!!simulatingId}
+                      >
+                        <Check size={14} />
+                        Approve in demo
+                      </button>
+                    </div>
+                  )}
+                  {selected.status === 'failed' && (
+                    <div className="failure-banner">
+                      <TriangleAlert size={15} />
+                      <div>
+                        <strong>Connection timed out</strong>
+                        <p>Database was unavailable.</p>
+                        <button onClick={() => startDemo(selected.id)} disabled={!!simulatingId}>
+                          Retry in demo <RotateCcw size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="timeline-heading">
+                    <h3>Timeline</h3>
+                    <span>{selected.events.length} events</span>
+                  </div>
+                  <ol className="timeline">
+                    {selected.events.map((event, index) => (
+                      <li key={event.id} className={`event-${event.kind}`}>
+                        <span className="timeline-marker">
+                          {index === selected.events.length - 1 && selected.status === 'running' ? (
+                            <span className="timeline-live" />
+                          ) : event.kind === 'error' ? (
+                            <X size={9} />
+                          ) : event.kind === 'warning' ? (
+                            <Minus size={9} />
+                          ) : (
+                            <Check size={9} />
+                          )}
+                        </span>
+                        <div>
+                          <p>{event.text}</p>
+                          <time>
+                            {new Date(event.at).toLocaleTimeString('en-GB', {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                            })}
+                          </time>
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                  <div className="inspector-footer">
+                    <button
+                      className="button button-secondary open-session-button"
+                      onClick={() =>
+                        setToast({
+                          title: 'Demo session',
+                          detail: 'No external agent window is connected.',
+                          tone: 'info',
+                        })
+                      }
+                    >
+                      <SquareTerminal size={15} />
+                      Open session
+                      <ArrowUpRight size={15} />
+                    </button>
+                    {selected.status === 'running' && (
+                      <button
+                        className="text-button"
+                        disabled={!!simulatingId}
+                        onClick={() => startDemo(selected.id)}
+                      >
+                        {simulatingId === selected.id ? (
+                          <LoaderCircle size={12} className="spin" />
+                        ) : (
+                          <FlaskConical size={12} />
+                        )}
+                        {simulatingId === selected.id
+                          ? 'Completion demo running'
+                          : 'Simulate completion'}
+                      </button>
+                    )}
+                  </div>
+                </aside>
+              )}
+            </div>
+          ) : (
+            <section className="activity-section" aria-label="Activity timeline">
+              <div className="activity-heading">
+                <h2>Recent events</h2>
+                <span className="demo-badge">
+                  <FlaskConical size={12} />
+                  Demo events
+                </span>
+              </div>
+              <div className="activity-list">
+                {allEvents.map((event) => (
+                  <button
+                    key={`${event.session.id}-${event.id}`}
+                    className="activity-row"
+                    onClick={() => {
+                      setSelectedId(event.session.id)
+                      setView('sessions')
+                    }}
+                  >
+                    <span className={`activity-event-icon event-${event.kind}`}>
+                      {event.kind === 'error' ? (
+                        <TriangleAlert size={16} />
+                      ) : event.kind === 'warning' ? (
+                        <CirclePause size={16} />
+                      ) : event.kind === 'success' ? (
+                        <CircleCheck size={16} />
+                      ) : (
+                        <Activity size={16} />
+                      )}
+                    </span>
+                    <span className="activity-description">
+                      <strong>{event.text}</strong>
+                      <span>
+                        {event.session.project}
+                        <span className="separator">/</span>
+                        {providers[event.session.provider].name}
+                      </span>
+                    </span>
+                    <time>{relativeTime(event.at, now)}</time>
+                    <ArrowUpRight size={14} />
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+          <footer className="page-footer">
+            <span>
+              <span className="neutral-dot" />
+              Demo workspace
+            </span>
+            <span>
+              pulse <span className="footer-slash">/</span> v0.1.0
+            </span>
+          </footer>
+        </main>
+      </div>
+
+      <dialog
+        ref={dialogRef}
+        className="app-dialog"
+        onCancel={() => setModal(null)}
+        onClick={(event) => {
+          if (event.target === event.currentTarget) setModal(null)
+        }}
+      >
+        <div className="dialog-content">
+          <div className="dialog-heading">
+            <div>
+              <span className="eyebrow">WORKSPACE</span>
+              <h2>{modal === 'settings' ? 'Preferences' : 'Notifications'}</h2>
+            </div>
+            <IconButton label="Close dialog" onClick={() => setModal(null)}>
+              <X size={19} />
+            </IconButton>
+          </div>
+          {modal === 'settings' ? (
+            <>
+              <div className="settings-group">
+                <div className="settings-group-label">NOTIFICATIONS</div>
+                <div className="setting-row">
+                  <span className="setting-icon">
+                    <BellRing size={18} />
+                  </span>
+                  <div>
+                    <strong>System notifications</strong>
+                    <span>On session completion</span>
+                  </div>
+                  <Toggle
+                    label="System notifications"
+                    checked={preferences.notifications}
+                    onChange={(enabled) => void enableNotifications(enabled)}
+                  />
+                </div>
+                <div className="setting-row">
+                  <span className="setting-icon">
+                    <Volume2 size={18} />
+                  </span>
+                  <div>
+                    <strong>Completion sound</strong>
+                    <span>A quiet two-note chime</span>
+                  </div>
+                  <Toggle
+                    label="Completion sound"
+                    checked={preferences.sound}
+                    onChange={(sound) => setPreferences((current) => ({ ...current, sound }))}
+                  />
+                </div>
+              </div>
+              <div className="settings-group">
+                <div className="settings-group-label">DISPLAY</div>
+                <div className="setting-row">
+                  <span className="setting-icon">
+                    <CircleCheck size={18} />
+                  </span>
+                  <div>
+                    <strong>Completed sessions</strong>
+                    <span>Visible in the workspace</span>
+                  </div>
+                  <Toggle
+                    label="Show completed sessions"
+                    checked={preferences.showCompleted}
+                    onChange={(showCompleted) =>
+                      setPreferences((current) => ({ ...current, showCompleted }))
+                    }
+                  />
+                </div>
+                <div className="setting-row">
+                  <span className="setting-icon">
+                    <Pin size={18} />
+                  </span>
+                  <div>
+                    <strong>Always on top</strong>
+                    <span>{desktop ? 'Current desktop window' : 'Desktop app only'}</span>
+                  </div>
+                  <Toggle
+                    label="Always on top"
+                    checked={pinned}
+                    onChange={() => void togglePin()}
+                    disabled={!desktop}
+                  />
+                </div>
+              </div>
+              <div className="integration-status">
+                <Monitor size={18} />
+                <div>
+                  <strong>{desktop ? 'Desktop preview' : 'Browser preview'}</strong>
+                  <span>Demo data only. No agent adapter connected.</span>
+                </div>
+                <span className="demo-badge">LOCAL</span>
+              </div>
+              <div className="dialog-footer">
+                <button className="text-button" onClick={resetDemo}>
+                  <RotateCcw size={13} />
+                  Reset demo
+                </button>
+                <button className="button button-primary" onClick={() => setModal(null)}>
+                  Done
+                  <Check size={14} />
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="notification-list">
+                {sessions
+                  .filter((session) => session.status !== 'running')
+                  .sort((first, second) => second.updatedAt - first.updatedAt)
+                  .map((session) => (
+                    <button
+                      key={session.id}
+                      className="notification-item"
+                      onClick={() => {
+                        setSelectedId(session.id)
+                        setView('sessions')
+                        setModal(null)
+                      }}
+                    >
+                      <span className={`notification-status-icon ${session.status}`}>
+                        {session.status === 'completed' ? (
+                          <CircleCheck size={19} />
+                        ) : session.status === 'waiting' ? (
+                          <CirclePause size={19} />
+                        ) : (
+                          <TriangleAlert size={19} />
+                        )}
+                      </span>
+                      <span>
+                        <strong>{session.project}</strong>
+                        <span>
+                          {statusLabels[session.status]}
+                          <span className="separator">/</span>
+                          {relativeTime(session.updatedAt, now)}
+                        </span>
+                      </span>
+                      <ArrowUpRight size={14} />
+                    </button>
+                  ))}
+              </div>
+              <div className="dialog-footer">
+                <span className="muted">Demo workspace</span>
+                <button className="button button-secondary" onClick={() => setModal(null)}>
+                  Close
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </dialog>
+      {notificationToast}
+    </div>
+  )
+}
+
+export default Workspace

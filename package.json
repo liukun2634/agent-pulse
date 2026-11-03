@@ -1,0 +1,42 @@
+{
+  "name": "pulse-agent-monitor",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "predesktop": "npm run build",
+    "desktop": "node scripts/desktop.mjs",
+    "desktop:dev": "node scripts/desktop.mjs --dev",
+    "test": "node --test src/sessions.test.ts",
+    "test:e2e": "playwright test",
+    "pretest:desktop": "npm run build",
+    "test:desktop": "node --test tests/desktop.test.mjs",
+    "format": "prettier --write src electron scripts tests *.json *.ts index.html README.md"
+  },
+  "dependencies": {
+    "@fontsource/dm-sans": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@fontsource/manrope": "^5.3.0",
+    "@icons-pack/react-simple-icons": "^13.15.1",
+    "lucide-react": "^1.61.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^44.9.3",
+    "oxlint": "^1.88.0",
+    "prettier": "^3.9.10",
+    "typescript": "~6.0.3",
+    "vite": "^8.3.4"
+  }
+}

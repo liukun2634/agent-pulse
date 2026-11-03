@@ -1,0 +1,105 @@
+@import '@fontsource/dm-sans/latin-400.css';
+@import '@fontsource/dm-sans/latin-500.css';
+@import '@fontsource/dm-sans/latin-600.css';
+@import '@fontsource/manrope/latin-600.css';
+@import '@fontsource/manrope/latin-700.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+
+:root {
+  font-family: 'DM Sans', sans-serif;
+  color: #29312d;
+  background: #f9faf9;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  --paper: #fff;
+  --background: #f9faf9;
+  --ink: #29312d;
+  --muted: #737d76;
+  --secondary: #59665d;
+  --border: #e4e8e4;
+  --green: #277454;
+  --green-soft: #edf5ef;
+  --amber: #996b26;
+  --red: #b55f54;
+  --blue: #5c7f9e;
+  --mono: 'JetBrains Mono', monospace;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+  letter-spacing: 0;
+}
+body {
+  margin: 0;
+  min-width: 320px;
+}
+button,
+input,
+select {
+  font: inherit;
+}
+button {
+  cursor: pointer;
+  color: inherit;
+  -webkit-user-select: none;
+  user-select: none;
+}
+button,
+input,
+select,
+dialog {
+  -webkit-tap-highlight-color: transparent;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid #6b9f82;
+  outline-offset: 3px;
+}
+button svg {
+  flex-shrink: 0;
+}
+button,
+a,
+input,
+select {
+  -webkit-app-region: no-drag;
+}
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+::selection {
+  background: #d7ecdf;
+  color: #224d36;
+}
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-thumb {
+  background: #ced5cf;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
