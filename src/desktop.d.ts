@@ -1,12 +1,15 @@
-import type { Session } from './sessions'
+import type { Session, SessionReference } from './sessions'
 
 export {}
 
 declare global {
+  type PulseSessionReference = SessionReference
   interface PulseAlert {
     id: string
     sessionId: string
     requestId?: string
+    reference: SessionReference
+    initial: boolean
     status: 'waiting' | 'completed' | 'failed'
     title: string
     project: string
@@ -18,6 +21,7 @@ declare global {
     items: PulseAlert[]
     revision: number
     systemNotifications: boolean
+    storageWarning?: string | null
     popup?: { sequence: number; ids: string[] }
   }
 
@@ -40,6 +44,8 @@ declare global {
       getAlerts: () => Promise<PulseAlertState>
       dismissAlert: (id: string) => Promise<void>
       showAlerts: () => Promise<void>
+      openAlertInbox: () => Promise<void>
+      onOpenAlertInbox: (listener: () => void) => () => void
       hideAlertPopup: (sequence: number) => Promise<void>
       setSystemNotifications: (enabled: boolean) => Promise<PulseAlertState>
       onAlerts: (listener: (state: PulseAlertState) => void) => () => void
@@ -47,8 +53,16 @@ declare global {
       setSessionArchived: (id: string, archived: boolean) => Promise<void>
       setSessionSource: (source: 'demo' | 'vscode') => Promise<PulseSessionFeed>
       refreshSessions: () => Promise<PulseSessionFeed>
-      openVSCode: (id: string) => Promise<{ mode: 'session' | 'workspace'; message?: string }>
-      onSessionOpened: (listener: (id: string) => void) => () => void
+      openVSCode: (
+        id: string,
+        reference?: SessionReference,
+      ) => Promise<{
+        mode: 'chat-view' | 'chat-editor' | 'unavailable' | 'stale'
+        verified: boolean
+        code?: string
+        message?: string
+      }>
+      onSessionOpened: (listener: (reference: SessionReference) => void) => () => void
       onSessionFeed: (listener: (feed: PulseSessionFeed) => void) => () => void
       getPinned: () => Promise<boolean>
       setPinned: (pinned: boolean) => Promise<boolean>

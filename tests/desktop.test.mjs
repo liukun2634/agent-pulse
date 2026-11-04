@@ -10,6 +10,9 @@ import {
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import net from 'node:net'
+import { randomUUID } from 'node:crypto'
+import { endpointPath } from '../vscode-companion/bridge.cjs'
 import { pathToFileURL } from 'node:url'
 import { expect } from '@playwright/test'
 import { _electron as electron } from 'playwright'
@@ -189,6 +192,215 @@ test('desktop pinning, mini monitor and session synchronization', { timeout: 900
 })
 
 test(
+  'P0 inbox preserves a new reply while an older navigation is in flight',
+  { timeout: 45000 },
+  async () => {
+    const temporary = mkdtempSync(path.join(tmpdir(), 'pulse-p0-'))
+    const storage = path.join(temporary, 'storage')
+    const workspace = path.join(storage, 'workspace-one')
+    const project = path.join(temporary, 'Project')
+    const transcripts = path.join(workspace, 'GitHub.copilot-chat', 'transcripts')
+    const chats = path.join(workspace, 'chatSessions')
+    mkdirSync(transcripts, { recursive: true })
+    mkdirSync(chats, { recursive: true })
+    mkdirSync(project)
+    writeFileSync(
+      path.join(workspace, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL(project).href }),
+    )
+    const timestamp = Date.now()
+    for (const id of ['one', 'two']) {
+      writeFileSync(
+        path.join(transcripts, `${id}.jsonl`),
+        JSON.stringify({
+          type: 'assistant.turn_start',
+          data: {},
+          timestamp: new Date(timestamp).toISOString(),
+        }) + '\n',
+      )
+      writeFileSync(
+        path.join(chats, `${id}.jsonl`),
+        JSON.stringify({
+          kind: 0,
+          v: {
+            customTitle: `Task ${id}`,
+            requests: [{ requestId: `request-${id}`, timestamp, modelState: { value: 4 } }],
+          },
+        }) + '\n',
+      )
+    }
+    const environment = {
+      ...process.env,
+      PULSE_TEST_MODE: '1',
+      PULSE_TEST_DATA: path.join(temporary, 'app'),
+      PULSE_VSCODE_STORAGE: storage,
+    }
+    delete environment.ELECTRON_RUN_AS_NODE
+    delete environment.PULSE_DEV_SERVER_URL
+    delete environment.PULSE_VSCODE_SCHEME
+    const descriptor = endpointPath(project)
+    const pipe =
+      process.platform === 'win32'
+        ? `\\\\.\\pipe\\pulse-p0-${randomUUID()}`
+        : path.join(temporary, 'test.sock')
+    const token = randomUUID()
+    let release
+    let received
+    const requestReceived = new Promise((resolve) => {
+      received = resolve
+    })
+    let calls = 0
+    const server = net.createServer((socket) => {
+      let input = ''
+      socket.on('error', () => {})
+      socket.on('data', (chunk) => {
+        input += chunk.toString()
+        if (!input.includes('\n')) return
+        const request = JSON.parse(input.trim())
+        assert.equal(request.token, token)
+        const reply = () =>
+          socket.end(
+            JSON.stringify({
+              ok: true,
+              sessionId: request.sessionId,
+              mode: 'chat-view',
+              verified: true,
+            }) + '\n',
+          )
+        calls++
+        if (calls === 1) {
+          release = reply
+          received()
+        } else reply()
+      })
+    })
+    let application
+    try {
+      application = await electron.launch({ args: [process.cwd()], env: environment })
+      let main = await application.firstWindow()
+      await expect(main.locator('.session-waiting')).toHaveCount(2)
+      const initial = await main.evaluate(() => window.pulse.getAlerts())
+      assert.equal(initial.items.length, 2)
+      assert.ok(initial.items.every((item) => item.initial))
+      assert.equal(application.windows().length, 1)
+      await application.evaluate(({ shell }) => {
+        globalThis.pulseExternalCalls = []
+        shell.openExternal = async (uri) => {
+          globalThis.pulseExternalCalls.push(uri)
+        }
+      })
+      await main.evaluate(() => {
+        window.pulseReceipts = []
+        window.pulse.onSessionOpened((reference) => window.pulseReceipts.push(reference))
+      })
+      await main.getByRole('button', { name: 'Notifications', exact: true }).click()
+      await expect(main.locator('.pending-alert-row')).toHaveCount(2)
+      mkdirSync('.artifacts', { recursive: true })
+      await main.screenshot({
+        path: '.artifacts/p0-inbox.png',
+        animations: 'disabled',
+        scale: 'css',
+      })
+      await main.getByRole('button', { name: 'Ignore reminder: Task two', exact: true }).click()
+      await expect(main.locator('.pending-alert-row')).toHaveCount(1)
+      assert.equal(
+        (await main.evaluate(() => window.pulse.getSessionFeed())).sessions.find(
+          (item) => item.task === 'Task two',
+        ).status,
+        'waiting',
+      )
+      await main.locator('.pending-alert-row .notification-item').click()
+      await expect(main.locator('.pending-alert-error')).toContainText('No new window was opened')
+      assert.equal((await main.evaluate(() => window.pulse.getAlerts())).items.length, 1)
+      assert.equal(
+        JSON.parse(readFileSync(path.join(temporary, 'app', 'reminder-history.json'), 'utf8')).items
+          .length,
+        1,
+      )
+      assert.deepEqual(await application.evaluate(() => globalThis.pulseExternalCalls), [])
+
+      await application.close()
+      application = await electron.launch({ args: [process.cwd()], env: environment })
+      main = await application.firstWindow()
+      await expect(main.locator('.session-waiting')).toHaveCount(2)
+      const restored = await main.evaluate(() => window.pulse.getAlerts())
+      assert.equal(restored.items.length, 1)
+      assert.equal(restored.items[0].task, 'Task one')
+      assert.equal(restored.storageWarning, null)
+      assert.equal(application.windows().length, 1)
+      await application.evaluate(({ shell }) => {
+        globalThis.pulseExternalCalls = []
+        shell.openExternal = async (uri) => {
+          globalThis.pulseExternalCalls.push(uri)
+        }
+      })
+      await main.evaluate(() => {
+        window.pulseReceipts = []
+        window.pulse.onSessionOpened((reference) => window.pulseReceipts.push(reference))
+      })
+      await main.getByRole('button', { name: 'Notifications', exact: true }).click()
+      await expect(main.locator('.pending-alert-row')).toHaveCount(1)
+
+      await new Promise((resolve) => server.listen(pipe, resolve))
+      mkdirSync(path.dirname(descriptor), { recursive: true })
+      writeFileSync(descriptor, JSON.stringify({ pipe, token }))
+      const old = initial.items.find((item) => item.task === 'Task one')
+      await main.locator('.pending-alert-row .notification-item').click()
+      await requestReceived
+      const completedAt = Date.now()
+      appendFileSync(
+        path.join(chats, 'one.jsonl'),
+        JSON.stringify({
+          kind: 2,
+          k: ['requests'],
+          v: [
+            {
+              requestId: 'new-turn',
+              timestamp: completedAt,
+              modelState: { value: 1, completedAt },
+            },
+          ],
+        }) + '\n',
+      )
+      await expect
+        .poll(async () => (await main.evaluate(() => window.pulse.getAlerts())).items[0]?.requestId)
+        .toBe('new-turn')
+      release()
+      await expect(main.locator('.pending-alert-row .notification-item')).toBeEnabled()
+      assert.equal(
+        (await main.evaluate(() => window.pulse.getAlerts())).items[0].requestId,
+        'new-turn',
+      )
+      assert.deepEqual(await main.evaluate(() => window.pulseReceipts), [])
+      const stale = await main.evaluate(
+        (alert) =>
+          window.pulse.openVSCode(alert.sessionId, { ...alert.reference, alertId: alert.id }),
+        old,
+      )
+      assert.equal(stale.mode, 'stale')
+      assert.equal(calls, 1)
+      await main.locator('.pending-alert-row .notification-item').click()
+      await expect(main.getByText('No pending reminders', { exact: true })).toBeVisible()
+      assert.equal((await main.evaluate(() => window.pulseReceipts))[0].requestId, 'new-turn')
+      const seen = await main.evaluate(() =>
+        JSON.parse(localStorage.getItem('pulse.seen-replies.v1')),
+      )
+      assert.ok(
+        Object.values(seen).some(
+          (value) => typeof value === 'string' && value.includes('new-turn'),
+        ),
+      )
+      assert.deepEqual(await application.evaluate(() => globalThis.pulseExternalCalls), [])
+    } finally {
+      if (application) await application.close()
+      server.close()
+      rmSync(descriptor, { force: true })
+      rmSync(temporary, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    }
+  },
+)
+
+test(
   'live VS Code sessions update both windows without demo mutations',
   { timeout: 90000 },
   async () => {
@@ -260,10 +472,13 @@ test(
         }
       })
       await main.getByRole('button', { name: 'Open in VS Code', exact: true }).click()
-      assert.equal(
-        await application.evaluate(() => globalThis.pulseTestOpenedUri),
-        `vscode://file${pathToFileURL(projectPath).pathname}`,
-      )
+      assert.equal(await application.evaluate(() => globalThis.pulseTestOpenedUri), undefined)
+      const disconnected = await main.evaluate(async () => {
+        const feed = await window.pulse.getSessionFeed()
+        return window.pulse.openVSCode(feed.sessions[0].id)
+      })
+      assert.equal(disconnected.mode, 'unavailable')
+      assert.equal(disconnected.verified, false)
 
       const miniPromise = application.waitForEvent('window')
       await main.getByRole('button', { name: 'Mini monitor', exact: true }).click()
@@ -433,9 +648,16 @@ test(
       assert.equal((await main.evaluate(() => window.pulse.getAlerts())).items.length, 0)
       await main.getByRole('combobox', { name: 'Session collection' }).selectOption('archived')
       await main.locator('.session-card').first().click()
-      assert.equal(await main.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
+      assert.equal(
+        await main.evaluate(() => document.documentElement.scrollWidth > innerWidth),
+        false,
+      )
       mkdirSync('.artifacts', { recursive: true })
-      await main.screenshot({ path: '.artifacts/workspace-archived.png', animations: 'disabled', scale: 'css' })
+      await main.screenshot({
+        path: '.artifacts/workspace-archived.png',
+        animations: 'disabled',
+        scale: 'css',
+      })
       await main.getByRole('button', { name: 'Restore session', exact: true }).click()
       await expect(main.locator('.session-card')).toHaveCount(0)
       await main.getByRole('combobox', { name: 'Session collection' }).selectOption('active')
@@ -545,9 +767,25 @@ test(
       await expect(reminder.locator('.alert-more')).toHaveText('+1 more')
       const currentAlerts = (await reminder.evaluate(() => window.pulse.getAlerts())).items
       await reminder.evaluate((id) => window.pulse.dismissAlert(id), currentAlerts[0].id)
-      appendFileSync(path.join(transcripts, 'two.jsonl'), JSON.stringify({ type: 'tool.execution_complete', data: { toolCallId: 'question-two', success: true }, timestamp: new Date().toISOString() }) + '\n')
-      await expect.poll(async () => (await reminder.evaluate(() => window.pulse.getAlerts())).items.length).toBe(0)
-      assert.equal(await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().includes('view=alerts')).isVisible()), false)
+      appendFileSync(
+        path.join(transcripts, 'two.jsonl'),
+        JSON.stringify({
+          type: 'tool.execution_complete',
+          data: { toolCallId: 'question-two', success: true },
+          timestamp: new Date().toISOString(),
+        }) + '\n',
+      )
+      await expect
+        .poll(async () => (await reminder.evaluate(() => window.pulse.getAlerts())).items.length)
+        .toBe(0)
+      assert.equal(
+        await application.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()
+            .find((window) => window.webContents.getURL().includes('view=alerts'))
+            .isVisible(),
+        ),
+        false,
+      )
     } finally {
       if (application) await application.close()
       rmSync(temporary, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })

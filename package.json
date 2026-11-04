@@ -12,7 +12,7 @@
     "predesktop": "npm run build",
     "desktop": "node scripts/desktop.mjs",
     "desktop:dev": "node scripts/desktop.mjs --dev",
-    "test": "node --test src/sessions.test.ts tests/vscode-sessions.test.cjs",
+    "test": "node --test src/sessions.test.ts tests/vscode-sessions.test.cjs tests/companion.test.cjs",
     "test:e2e": "playwright test",
     "pretest:desktop": "npm run build",
     "test:desktop": "node --test tests/desktop.test.mjs",

@@ -1470,6 +1470,31 @@ h1 {
   font-size: 10px;
   color: #88a764;
 }
+.notification-list {
+  max-height: 420px;
+  overflow-y: auto;
+}
+.pending-alert-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.pending-alert-row .notification-item {
+  min-width: 0;
+  border-bottom: 0;
+}
+.pending-alert-row .notification-item strong {
+  overflow-wrap: anywhere;
+}
+.pending-alert-error {
+  grid-column: 1 / -1;
+  margin: 0 0 12px;
+  color: #99542c;
+  font-size: 12px;
+  line-height: 1.5;
+}
 .notification-item {
   display: flex;
   align-items: center;
@@ -1768,12 +1793,11 @@ body:has(.mini-rail) {
   padding: 0 18px;
 }
 .mini-session {
-  padding: 14px 0;
+  padding: 15px 0;
   width: 100%;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 14px;
-  align-items: start;
-  gap: 10px;
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
   background: none;
   border: 0;
   border-bottom: 1px solid #e6edd7;
@@ -1782,7 +1806,12 @@ body:has(.mini-rail) {
 .mini-session:hover {
   background: #f5f8ee;
 }
+.mini-provider {
+  padding-top: 2px;
+  flex-shrink: 0;
+}
 .mini-session-content {
+  flex: 1;
   min-width: 0;
 }
 .mini-session-title {
@@ -1791,39 +1820,23 @@ body:has(.mini-rail) {
   -webkit-line-clamp: 2;
   overflow: hidden;
   overflow-wrap: anywhere;
-  min-height: 39px;
-  font:
-    600 13px/1.5 'Manrope',
-    sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
   color: var(--ink);
 }
-.mini-session-folder {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-  height: 17px;
-  margin-top: 5px;
-  font-size: 10px;
+.mini-session-subtitle {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.6;
   color: var(--secondary);
-}
-.mini-session-folder > svg,
-.mini-session-folder > .provider-icon {
-  flex-shrink: 0;
-}
-.mini-session-folder > span:last-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.mini-session-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+.mini-session-content > .status-badge {
   margin-top: 8px;
-}
-.mini-session-meta .status-badge {
   font-size: 9px;
 }
 .mini-session-end {
@@ -1831,14 +1844,14 @@ body:has(.mini-rail) {
   color: var(--muted);
   white-space: nowrap;
   flex-shrink: 0;
-}
-.mini-session-open {
-  margin-top: 3px;
-  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 11px;
+  padding-top: 2px;
 }
 .mini-session-content > .mini-progress {
   display: block;
-  min-height: 14px;
 }
 .mini-footer {
   padding: 15px 19px;

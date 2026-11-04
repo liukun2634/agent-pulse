@@ -12,9 +12,84 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { tmpdir } = require('node:os')
 const { pathToFileURL } = require('node:url')
-const { createAlertTracker } = require('../electron/session-alerts.cjs')
+const {
+  createAlertTracker,
+  sessionReference,
+  matchesReference,
+} = require('../electron/session-alerts.cjs')
 
 const now = Date.parse('2026-11-03T10:00:00Z')
+test('reminder history restores pending items without re-alerting dismissed input', async () => {
+  const { createAlertHistory } = require('../electron/alert-history.cjs')
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'pulse-history-'))
+  try {
+    const filename = path.join(root, 'history.json')
+    const tracker = createAlertTracker()
+    const sessions = ['one', 'two'].map((id) => ({
+      id,
+      requestId: id,
+      project: 'project',
+      task: id,
+      status: 'waiting',
+      updatedAt: now,
+    }))
+    const alerts = tracker.update(sessions, now)
+    createAlertHistory(filename, tracker).save([alerts[0]])
+    const restoredTracker = createAlertTracker()
+    const history = createAlertHistory(filename, restoredTracker)
+    const restored = history.load()
+    assert.equal(restored.length, 1)
+    assert.equal(restored[0].id, alerts[0].id)
+    assert.equal(restored[0].initial, true)
+    assert.deepEqual(restoredTracker.update(sessions), [])
+    restoredTracker.beginRecovery()
+    const caughtUp = restoredTracker.update([
+      { ...sessions[0], status: 'completed', finishedAt: now + 10 },
+    ])
+    assert.equal(caughtUp[0].initial, true)
+    assert.notEqual(caughtUp[0].id, alerts[0].id)
+    await fs.writeFile(filename, '{broken')
+    const damaged = createAlertHistory(filename, createAlertTracker())
+    assert.deepEqual(damaged.load(), [])
+    assert.ok(damaged.warning)
+    assert.ok((await fs.readdir(root)).some((name) => name.startsWith('history.json.invalid-')))
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('initial input requests enter the inbox silently while historical completions stay quiet', () => {
+  const tracker = createAlertTracker()
+  const session = { id: 'one', requestId: 'request-1', status: 'waiting', updatedAt: now }
+  const alerts = tracker.update([
+    session,
+    { ...session, id: 'old', status: 'completed', finishedAt: now },
+  ])
+  assert.equal(alerts.length, 1)
+  assert.equal(alerts[0].initial, true)
+  assert.equal(alerts[0].reference.requestId, 'request-1')
+  assert.deepEqual(tracker.update([session]), [])
+  tracker.update([{ ...session, status: 'running' }])
+  assert.equal(tracker.update([session])[0].initial, false)
+})
+
+test('request references reject later replies, state changes and ambiguous legacy updates', () => {
+  const session = {
+    id: 'one',
+    requestId: 'first',
+    status: 'completed',
+    finishedAt: now,
+    updatedAt: now,
+  }
+  const reference = sessionReference(session)
+  assert.equal(matchesReference(session, reference), true)
+  assert.equal(matchesReference({ ...session, requestId: 'second' }, reference), false)
+  assert.equal(matchesReference({ ...session, finishedAt: now + 1 }, reference), false)
+  assert.equal(matchesReference({ ...session, status: 'running' }, reference), false)
+  const legacy = { ...session, requestId: undefined, finishedAt: null, status: 'waiting' }
+  assert.equal(matchesReference({ ...legacy, updatedAt: now + 1 }, sessionReference(legacy)), false)
+})
+
 test('background alerts fire once for input and completion, not initial history or repeated polls', () => {
   const tracker = createAlertTracker()
   const session = {

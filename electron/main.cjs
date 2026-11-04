@@ -5,16 +5,17 @@ const {
   Menu,
   nativeImage,
   Notification,
+  powerMonitor,
   screen,
   session,
-  shell,
   Tray,
 } = require('electron')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { createVSCodeSource } = require('./vscode-sessions.cjs')
 const { openSession } = require('../vscode-companion/bridge.cjs')
-const { createAlertTracker } = require('./session-alerts.cjs')
+const { createAlertTracker, sessionReference, matchesReference } = require('./session-alerts.cjs')
+const { createAlertHistory } = require('./alert-history.cjs')
 const fs = require('node:fs')
 
 const root = path.join(__dirname, '..')
@@ -32,6 +33,7 @@ let popupSequence = 0
 let popupIds = []
 let systemNotifications = false
 const alertTracker = createAlertTracker()
+let alertHistory
 const nativeNotifications = new Set()
 let archivedSessions = new Map()
 let tray
@@ -57,7 +59,10 @@ let scanning = false
 let sourceGeneration = 0
 
 function publishFeed(next) {
-  const freshAlerts = next.source === 'vscode' ? alertTracker.update(next.sessions) : []
+  const freshAlerts =
+    next.source === 'vscode' && next.scannedAt !== null && next.state !== 'unavailable'
+      ? alertTracker.update(next.sessions)
+      : []
   feed = {
     ...next,
     sessions: next.sessions.map((item) => ({ ...item, archivedAt: archivedSessions.get(item.id) })),
@@ -75,15 +80,19 @@ function publishFeed(next) {
   for (const alert of freshAlerts) {
     pendingAlerts = pendingAlerts.filter((item) => item.sessionId !== alert.sessionId)
     pendingAlerts.push(alert)
-    if (systemNotifications)
+    if (systemNotifications && !alert.initial)
       showSystemNotification({
         title: alert.title,
         body: `${alert.project}: ${alert.task}`,
         sessionId: alert.sessionId,
+        reference: { ...alert.reference, alertId: alert.id },
       })
   }
-  if (freshAlerts.length || previousCount !== pendingAlerts.length) publishAlerts()
-  if (freshAlerts.length) showAlertWindow(freshAlerts.map((alert) => alert.id))
+  const storageChanged = persistAlertHistory()
+  if (freshAlerts.length || previousCount !== pendingAlerts.length || storageChanged)
+    publishAlerts()
+  const popups = freshAlerts.filter((alert) => !alert.initial)
+  if (popups.length) showAlertWindow(popups.map((alert) => alert.id))
 }
 
 function alertState() {
@@ -91,11 +100,20 @@ function alertState() {
     items: pendingAlerts,
     revision: alertRevision,
     systemNotifications,
+    storageWarning: alertHistory?.warning ?? null,
     popup: { sequence: popupSequence, ids: popupIds },
   }
 }
 
+function persistAlertHistory() {
+  if (!alertHistory || feed.source !== 'vscode') return false
+  const previous = alertHistory.warning
+  alertHistory.save(pendingAlerts)
+  return previous !== alertHistory.warning
+}
+
 function publishAlerts() {
+  persistAlertHistory()
   alertRevision++
   for (const window of windows) window.webContents.send('pulse:alerts', alertState())
   if (
@@ -280,6 +298,13 @@ function showMain(sessionId, maximize = false) {
   }
 }
 
+function showAlertInbox() {
+  showMain()
+  const reveal = () => mainWindow.webContents.send('pulse:open-alert-inbox')
+  if (mainWindow.webContents.isLoading()) mainWindow.webContents.once('did-finish-load', reveal)
+  else reveal()
+}
+
 function alignMini(area, top = miniWindow.getBounds().y) {
   const bounds = miniWindow.getBounds()
   const horizontal =
@@ -378,6 +403,10 @@ ipcMain.handle('pulse:show-alerts', (event) => {
   trustedWindow(event)
   showAlertWindow()
 })
+ipcMain.handle('pulse:open-alert-inbox', (event) => {
+  trustedWindow(event)
+  showAlertInbox()
+})
 ipcMain.handle('pulse:hide-alert-popup', (event, sequence) => {
   if (trustedWindow(event) !== alertWindow) throw new Error('Invalid popup window.')
   if (sequence === popupSequence) alertWindow.hide()
@@ -423,10 +452,12 @@ ipcMain.handle('pulse:set-session-source', (event, source) => {
   trustedWindow(event)
   if (!['demo', 'vscode'].includes(source)) throw new TypeError('Invalid session source.')
   if (source !== feed.source) {
+    persistAlertHistory()
     sourceGeneration++
     alertTracker.reset()
-    pendingAlerts = []
-    publishAlerts()
+    pendingAlerts = source === 'vscode' ? alertHistory.load() : []
+    popupIds = []
+    popupSequence++
     publishFeed({
       source,
       state: source === 'demo' ? 'demo' : 'connecting',
@@ -434,6 +465,7 @@ ipcMain.handle('pulse:set-session-source', (event, source) => {
       sessions: [],
       scannedAt: null,
     })
+    publishAlerts()
   }
   return refreshFeed(true)
 })
@@ -441,7 +473,7 @@ ipcMain.handle('pulse:refresh-sessions', (event) => {
   trustedWindow(event)
   return refreshFeed(true)
 })
-async function openVSCodeSession(id) {
+async function openVSCodeSession(id, expected) {
   if (
     feed.source !== 'vscode' ||
     typeof id !== 'string' ||
@@ -450,24 +482,55 @@ async function openVSCodeSession(id) {
     throw new TypeError('Unknown VS Code session.')
   const target = vscodeSource.sessionTarget(id)
   if (!target) throw new Error('The workspace is no longer available.')
-  await shell.openExternal(target.uri)
-  try {
-    await openSession(target.workspacePath, target.scheme, target.sessionId)
-    pendingAlerts = pendingAlerts.filter((alert) => alert.sessionId !== id)
-    publishAlerts()
-    for (const window of windows) window.webContents.send('pulse:session-opened', id)
-    return { mode: 'session' }
-  } catch {
+  const openedSnapshot = feed.sessions.find((item) => item.id === id)
+  if (
+    expected &&
+    (!matchesReference(openedSnapshot, expected) ||
+      (expected.alertId &&
+        !pendingAlerts.some((alert) => alert.id === expected.alertId && alert.sessionId === id)))
+  )
     return {
-      mode: 'workspace',
-      message:
-        'Workspace opened. Install or activate Pulse Companion to open the exact conversation.',
+      mode: 'stale',
+      verified: false,
+      message: 'This request has changed. Select the current session or reminder and try again.',
+    }
+  const reference = sessionReference(openedSnapshot)
+  const generation = sourceGeneration
+  const pendingIds = new Set(
+    pendingAlerts
+      .filter(
+        (alert) =>
+          alert.sessionId === id &&
+          (!expected?.alertId || alert.id === expected.alertId) &&
+          matchesReference({ ...alert.reference, id: alert.sessionId }, reference),
+      )
+      .map((alert) => alert.id),
+  )
+  try {
+    const opened = await openSession(target.workspacePath, target.scheme, target.sessionId)
+    const current = feed.sessions.find((item) => item.id === id)
+    if (
+      opened.verified &&
+      generation === sourceGeneration &&
+      matchesReference(current, reference)
+    ) {
+      pendingAlerts = pendingAlerts.filter((alert) => !pendingIds.has(alert.id))
+      publishAlerts()
+      for (const window of windows) window.webContents.send('pulse:session-opened', reference)
+    }
+    return opened
+  } catch (error) {
+    return {
+      mode: 'unavailable',
+      verified: false,
+      code: error.code ?? 'connection-failed',
+      message: `${error.message || 'The VS Code request failed.'} No new window was opened.`,
     }
   }
 }
-ipcMain.handle('pulse:open-vscode', async (event, id) => {
+ipcMain.handle('pulse:open-vscode', async (event, id, reference) => {
   trustedWindow(event)
-  return openVSCodeSession(id)
+  return openVSCodeSession(id, reference)
 })
 ipcMain.handle('pulse:set-pinned', (event, pinned) => {
   if (typeof pinned !== 'boolean') throw new TypeError('Expected a boolean.')
@@ -525,9 +588,9 @@ function showSystemNotification(payload) {
       : undefined
   notification.on('click', () => {
     if (sessionId)
-      void openVSCodeSession(sessionId)
+      void openVSCodeSession(sessionId, payload.reference)
         .then((result) => {
-          if (result.mode !== 'session') showMain(sessionId)
+          if (!result.verified) showMain(sessionId)
         })
         .catch(() => showMain(sessionId))
     else showMain()
@@ -549,6 +612,7 @@ function createTray() {
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: 'Open workspace', click: () => showMain() },
+      { label: 'Pending reminders', click: () => showAlertInbox() },
       { label: 'Mini monitor', click: () => showMini() },
       { type: 'separator' },
       { label: 'Quit Pulse', click: () => app.quit() },
@@ -561,6 +625,16 @@ if (!testMode && !app.requestSingleInstanceLock()) app.quit()
 else {
   app.on('second-instance', () => showMain())
   app.whenReady().then(() => {
+    alertHistory = createAlertHistory(
+      path.join(app.getPath('userData'), 'reminder-history.json'),
+      alertTracker,
+    )
+    if (feed.source === 'vscode') pendingAlerts = alertHistory.load()
+    powerMonitor.on('suspend', () => alertTracker.beginRecovery())
+    powerMonitor.on('resume', () => {
+      alertTracker.beginRecovery()
+      void refreshFeed(true)
+    })
     try {
       const saved = JSON.parse(
         fs.readFileSync(path.join(app.getPath('userData'), 'session-management.json'), 'utf8'),
@@ -590,6 +664,7 @@ else {
   })
   app.on('activate', () => showMain())
   app.on('before-quit', () => {
+    persistAlertHistory()
     quitting = true
     clearInterval(feedTimer)
     vscodeSource.close()

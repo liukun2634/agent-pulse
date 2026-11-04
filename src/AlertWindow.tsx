@@ -47,8 +47,11 @@ export default function AlertWindow() {
     setBusy(true)
     setError(null)
     try {
-      const result = await window.pulse?.openVSCode(alert.sessionId)
-      if (result?.mode === 'workspace')
+      const result = await window.pulse?.openVSCode(alert.sessionId, {
+        ...alert.reference,
+        alertId: alert.id,
+      })
+      if (result?.message)
         setError({ id: alert.id, text: result.message ?? 'Pulse Companion is not connected.' })
     } catch {
       setError({ id: alert.id, text: 'Could not open this session. Try again or open Pulse.' })
@@ -81,8 +84,8 @@ export default function AlertWindow() {
         {items.length > 1 && (
           <button
             className="alert-more"
-            onClick={() => void window.pulse?.openWorkspace(alert?.sessionId)}
-            title="View sessions in Pulse"
+            onClick={() => void window.pulse?.openAlertInbox()}
+            title="View pending reminders"
           >
             +{items.length - 1} more
           </button>

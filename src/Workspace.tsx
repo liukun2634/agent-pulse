@@ -57,6 +57,8 @@ import {
   idleTime,
   parseSessions,
   providers,
+  referenceForSession,
+  replyMarker,
   relativeTime,
   serializeSessions,
   statusLabels,
@@ -126,13 +128,16 @@ function initialPreferences(): Preferences {
   }
 }
 
-function initialSeen(): Record<string, number> {
+function initialSeen(): Record<string, number | string> {
   try {
     const value = JSON.parse(localStorage.getItem(SEEN_KEY) ?? '{}')
     return value && typeof value === 'object' && !Array.isArray(value)
       ? Object.fromEntries(
           Object.entries(value)
-            .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
+            .filter(
+              (entry): entry is [string, number | string] =>
+                typeof entry[1] === 'number' || typeof entry[1] === 'string',
+            )
             .slice(-200),
         )
       : {}
@@ -326,6 +331,8 @@ function Workspace() {
   const [layout, setLayout] = useState<'grid' | 'list'>('grid')
   const [modal, setModal] = useState<Modal>(null)
   const [toast, setToast] = useState<Toast | null>(null)
+  const [openingAlertId, setOpeningAlertId] = useState<string | null>(null)
+  const [alertError, setAlertError] = useState<{ id: string; text: string } | null>(null)
   const [pinned, setPinned] = useState(false)
   const [miniState, setMiniState] = useState<PulseMiniState>({ collapsed: false, edge: 'right' })
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -374,7 +381,9 @@ function Workspace() {
       !miniMode &&
       preferences.sound &&
       alerts.revision >= 0 &&
-      incoming.items.some((item) => !alerts.items.some((previous) => previous.id === item.id))
+      incoming.items.some(
+        (item) => !item.initial && !alerts.items.some((previous) => previous.id === item.id),
+      )
     )
       playSound()
     setAlerts(incoming)
@@ -399,25 +408,24 @@ function Workspace() {
     }
   }, [])
 
-  const markOpened = useEffectEvent((id: string) => {
-    const session = sessions.find((item) => item.id === id)
-    if (session?.status === 'completed')
-      setSeenReplies((current) => ({ ...current, [id]: session.finishedAt ?? session.updatedAt }))
+  const markOpened = useEffectEvent((reference: PulseSessionReference) => {
+    const session = sessions.find((item) => item.id === reference.sessionId)
+    if (
+      session?.status === 'completed' &&
+      (session.requestId ?? null) === reference.requestId &&
+      session.finishedAt === reference.finishedAt
+    )
+      setSeenReplies((current) => ({ ...current, [session.id]: replyMarker(session) }))
   })
 
   useEffect(() => desktop?.onSessionOpened(markOpened), [])
+  useEffect(() => desktop?.onOpenAlertInbox?.(() => setModal('notifications')), [])
 
   useEffect(() => {
     try {
       localStorage.setItem(
         SEEN_KEY,
-        JSON.stringify(
-          Object.fromEntries(
-            Object.entries(seenReplies)
-              .sort((first, second) => second[1] - first[1])
-              .slice(0, 200),
-          ),
-        ),
+        JSON.stringify(Object.fromEntries(Object.entries(seenReplies).slice(-200))),
       )
     } catch {
       reportStorageFailure()
@@ -485,10 +493,21 @@ function Workspace() {
 
   async function openVSCode(id: string) {
     try {
-      const result = await desktop?.openVSCode(id)
-      if (result?.mode === 'workspace')
+      const session = sessions.find((item) => item.id === id)
+      if (!session) return
+      const result = await desktop?.openVSCode(id, referenceForSession(session))
+      if (result?.message)
         setToast({
-          title: 'Workspace opened',
+          title:
+            result.mode === 'unavailable'
+              ? result.code === 'session-not-found' || result.code === 'session-unreadable'
+                ? 'Session unavailable'
+                : result.code === 'navigation-failed'
+                  ? 'VS Code navigation failed'
+                  : 'VS Code connection unavailable'
+              : result.mode === 'stale'
+                ? 'Session changed'
+                : 'Chat opened in an editor',
           detail: result.message ?? 'Pulse Companion is not connected.',
           tone: 'info',
         })
@@ -498,6 +517,38 @@ function Workspace() {
         detail: 'The workspace or VS Code URL handler is unavailable.',
         tone: 'info',
       })
+    }
+  }
+
+  async function openPendingAlert(alert: PulseAlert) {
+    if (!desktop || openingAlertId) return
+    setOpeningAlertId(alert.id)
+    setAlertError(null)
+    try {
+      const result = await desktop.openVSCode(alert.sessionId, {
+        ...alert.reference,
+        alertId: alert.id,
+      })
+      if (!result.verified || result.message)
+        setAlertError({
+          id: alert.id,
+          text: result.message ?? 'The session could not be verified.',
+        })
+    } catch {
+      setAlertError({
+        id: alert.id,
+        text: 'This session is unavailable. Retry after reconnecting VS Code, or ignore this reminder.',
+      })
+    } finally {
+      setOpeningAlertId(null)
+    }
+  }
+
+  async function ignoreAlert(id: string) {
+    try {
+      await desktop?.dismissAlert(id)
+    } catch {
+      setAlertError({ id, text: 'The reminder could not be dismissed. Please try again.' })
     }
   }
 
@@ -633,7 +684,10 @@ function Workspace() {
   )
   const completed = sessions.filter((session) => session.status === 'completed')
   const ready = completed.filter(
-    (session) => live && seenReplies[session.id] !== (session.finishedAt ?? session.updatedAt),
+    (session) =>
+      live &&
+      seenReplies[session.id] !== replyMarker(session) &&
+      seenReplies[session.id] !== (session.finishedAt ?? session.updatedAt),
   )
   const visible = filterSessions(sessions, query, filter, provider).filter(
     (session) =>
@@ -873,13 +927,13 @@ function Workspace() {
               <button
                 key={item.id}
                 className={`rail-session mini-${item.status}`}
-                title={`${item.task}\n${item.project} / ${statusLabels[item.status]}`}
+                title={`${item.project}\n${item.task}\n${statusLabels[item.status]}`}
                 aria-label={`Open ${item.project}: ${item.task}`}
                 onClick={() => (live ? void openVSCode(item.id) : openWorkspace(item.id))}
               >
                 <ProviderIcon provider={item.provider} size={18} />
                 <span className={`rail-status rail-status-${item.status}`} />
-                <span className="rail-session-name">{item.task}</span>
+                <span className="rail-session-name">{item.project}</span>
               </button>
             ))}
         </nav>
@@ -990,28 +1044,26 @@ function Workspace() {
               <button
                 key={session.id}
                 className={`mini-session mini-${session.status}`}
-                title={`${session.task}\n${session.project}`}
+                title={`${session.project}\n${session.task}`}
                 onClick={() => (live ? void openVSCode(session.id) : openWorkspace(session.id))}
               >
+                <span className="mini-provider">
+                  <ProviderIcon provider={session.provider} size={20} />
+                </span>
                 <span className="mini-session-content">
-                  <strong className="mini-session-title">{session.task}</strong>
-                  <span className="mini-session-folder" title={session.project}>
-                    <ProviderIcon provider={session.provider} size={12} />
-                    <Folder size={11} />
-                    <span>{session.project}</span>
+                  <strong className="mini-session-title">{session.project}</strong>
+                  <span className="mini-session-subtitle" title={session.task}>
+                    {session.task}
                   </span>
-                  <span className="mini-session-meta">
-                    <StatusBadge status={session.status} />
-                    <span
-                      className="mini-session-end"
-                      title={live ? 'Time since last transcript activity' : 'Elapsed time'}
-                    >
-                      {live ? `Idle ${idleTime(session, now)}` : elapsed(session, now)}
-                    </span>
-                  </span>
+                  <StatusBadge status={session.status} />
                   {live && <span className="mini-progress">{session.events.at(-1)?.text}</span>}
                 </span>
-                <ArrowUpRight size={14} className="mini-session-open" />
+                <span className="mini-session-end">
+                  <span title={live ? 'Time since last transcript activity' : 'Elapsed time'}>
+                    {live ? `Idle ${idleTime(session, now)}` : elapsed(session, now)}
+                  </span>
+                  <ArrowUpRight size={13} />
+                </span>
               </button>
             ))}
         </div>
@@ -1152,9 +1204,7 @@ function Workspace() {
             <IconButton
               label="Notifications"
               className="notification-button"
-              onClick={() =>
-                live && alerts.items.length ? void desktop?.showAlerts() : setModal('notifications')
-              }
+              onClick={() => setModal('notifications')}
             >
               <Bell size={18} />
               {(live ? alerts.items.length : attention.length) > 0 && (
@@ -1807,42 +1857,106 @@ function Workspace() {
           ) : (
             <>
               <div className="notification-list">
-                {sessions
-                  .filter((session) => session.status !== 'running')
-                  .sort((first, second) => second.updatedAt - first.updatedAt)
-                  .map((session) => (
-                    <button
-                      key={session.id}
-                      className="notification-item"
-                      onClick={() => {
-                        setSelectedId(session.id)
-                        setView('sessions')
-                        setModal(null)
-                      }}
-                    >
-                      <span className={`notification-status-icon ${session.status}`}>
-                        {session.status === 'completed' ? (
-                          <CircleCheck size={19} />
-                        ) : session.status === 'waiting' ? (
-                          <CirclePause size={19} />
-                        ) : (
-                          <TriangleAlert size={19} />
-                        )}
-                      </span>
-                      <span>
-                        <strong>{session.project}</strong>
-                        <span>
-                          {statusLabels[session.status]}
-                          <span className="separator">/</span>
-                          {relativeTime(session.updatedAt, now)}
+                {live && alerts.storageWarning && (
+                  <p className="pending-alert-error" role="alert">
+                    {alerts.storageWarning}
+                  </p>
+                )}
+                {live ? (
+                  alerts.items.length ? (
+                    [...alerts.items]
+                      .sort(
+                        (first, second) =>
+                          Number(second.status === 'waiting') -
+                            Number(first.status === 'waiting') || second.at - first.at,
+                      )
+                      .map((alert) => (
+                        <div className="pending-alert-row" key={alert.id}>
+                          <button
+                            className="notification-item"
+                            aria-label={`Open ${alert.project}: ${alert.task}`}
+                            disabled={!!openingAlertId}
+                            onClick={() => void openPendingAlert(alert)}
+                          >
+                            <span className={`notification-status-icon ${alert.status}`}>
+                              {openingAlertId === alert.id ? (
+                                <LoaderCircle size={19} className="spin" />
+                              ) : alert.status === 'waiting' ? (
+                                <CirclePause size={19} />
+                              ) : alert.status === 'completed' ? (
+                                <CheckCheck size={19} />
+                              ) : (
+                                <TriangleAlert size={19} />
+                              )}
+                            </span>
+                            <span>
+                              <strong>{alert.task}</strong>
+                              <span>
+                                {alert.project}
+                                <span className="separator">/</span>
+                                {statusLabels[alert.status]}
+                              </span>
+                              <span>{relativeTime(alert.at, now)}</span>
+                            </span>
+                            <ArrowUpRight size={14} />
+                          </button>
+                          <IconButton
+                            label={`Ignore reminder: ${alert.task}`}
+                            disabled={openingAlertId === alert.id}
+                            onClick={() => void ignoreAlert(alert.id)}
+                          >
+                            <X size={15} />
+                          </IconButton>
+                          {alertError?.id === alert.id && (
+                            <p className="pending-alert-error" role="alert">
+                              {alertError.text}
+                            </p>
+                          )}
+                        </div>
+                      ))
+                  ) : (
+                    <p className="source-message">No pending reminders</p>
+                  )
+                ) : (
+                  sessions
+                    .filter((session) => session.status !== 'running')
+                    .sort((first, second) => second.updatedAt - first.updatedAt)
+                    .map((session) => (
+                      <button
+                        key={session.id}
+                        className="notification-item"
+                        onClick={() => {
+                          setSelectedId(session.id)
+                          setView('sessions')
+                          setModal(null)
+                        }}
+                      >
+                        <span className={`notification-status-icon ${session.status}`}>
+                          {session.status === 'completed' ? (
+                            <CircleCheck size={19} />
+                          ) : session.status === 'waiting' ? (
+                            <CirclePause size={19} />
+                          ) : (
+                            <TriangleAlert size={19} />
+                          )}
                         </span>
-                      </span>
-                      <ArrowUpRight size={14} />
-                    </button>
-                  ))}
+                        <span>
+                          <strong>{session.project}</strong>
+                          <span>
+                            {statusLabels[session.status]}
+                            <span className="separator">/</span>
+                            {relativeTime(session.updatedAt, now)}
+                          </span>
+                        </span>
+                        <ArrowUpRight size={14} />
+                      </button>
+                    ))
+                )}
               </div>
               <div className="dialog-footer">
-                <span className="muted">{live ? 'VS Code workspace' : 'Demo workspace'}</span>
+                <span className="muted">
+                  {live ? `${alerts.items.length} pending reminders` : 'Demo workspace'}
+                </span>
                 <button className="button button-secondary" onClick={() => setModal(null)}>
                   Close
                 </button>

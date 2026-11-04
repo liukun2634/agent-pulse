@@ -1,3 +1,30 @@
+function sessionReference(session) {
+  return {
+    sessionId: session.id,
+    requestId: session.requestId ?? null,
+    status: session.status,
+    finishedAt: session.finishedAt ?? null,
+    updatedAt: session.updatedAt ?? 0,
+  }
+}
+
+function matchesReference(session, reference) {
+  if (
+    !session ||
+    !reference ||
+    session.id !== reference.sessionId ||
+    (session.requestId ?? null) !== reference.requestId ||
+    session.status !== reference.status
+  )
+    return false
+  if (['completed', 'failed', 'cancelled'].includes(session.status))
+    return (
+      (session.finishedAt ?? null) === reference.finishedAt &&
+      (reference.finishedAt !== null || session.updatedAt === reference.updatedAt)
+    )
+  return reference.requestId !== null || session.updatedAt === reference.updatedAt
+}
+
 function createAlertTracker() {
   const observed = new Map()
   let initialized = false
@@ -21,7 +48,7 @@ function createAlertTracker() {
       const terminalSent = newRequest || resumed ? false : previous?.terminalSent === true
       const needsInput =
         session.status === 'waiting' &&
-        (previous ? previous.status !== 'waiting' || newRequest : initialized)
+        (previous ? previous.status !== 'waiting' || newRequest : true)
       const finished =
         ['completed', 'failed'].includes(session.status) && wasActive && !terminalSent
       if (needsInput || finished)
@@ -29,6 +56,8 @@ function createAlertTracker() {
           id: `alert-${++sequence}`,
           sessionId: session.id,
           requestId: session.requestId,
+          reference: sessionReference(session),
+          initial: !initialized,
           status: session.status,
           title:
             session.status === 'waiting'
@@ -57,7 +86,49 @@ function createAlertTracker() {
     initialized = false
   }
 
-  return { update, reset }
+  function snapshot() {
+    return { version: 1, sequence, observed: [...observed] }
+  }
+
+  function restore(saved) {
+    if (
+      saved?.version !== 1 ||
+      !Number.isSafeInteger(saved.sequence) ||
+      saved.sequence < 0 ||
+      !Array.isArray(saved.observed) ||
+      saved.observed.length > 1000
+    )
+      throw new Error('Invalid alert baseline.')
+    const valid = saved.observed.every(
+      (entry) =>
+        Array.isArray(entry) &&
+        entry.length === 2 &&
+        typeof entry[0] === 'string' &&
+        entry[0].length <= 512 &&
+        entry[1] &&
+        ['running', 'waiting', 'completed', 'failed', 'cancelled', 'idle'].includes(
+          entry[1].status,
+        ) &&
+        (entry[1].requestId === undefined || typeof entry[1].requestId === 'string') &&
+        typeof entry[1].active === 'boolean' &&
+        typeof entry[1].terminalSent === 'boolean',
+    )
+    if (!valid) throw new Error('Invalid alert baseline.')
+    observed.clear()
+    for (const [id, state] of saved.observed) observed.set(id, { ...state })
+    sequence = saved.sequence
+    initialized = false
+  }
+
+  return {
+    update,
+    reset,
+    snapshot,
+    restore,
+    beginRecovery: () => {
+      initialized = false
+    },
+  }
 }
 
-module.exports = { createAlertTracker }
+module.exports = { createAlertTracker, sessionReference, matchesReference }

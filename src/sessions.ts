@@ -28,6 +28,31 @@ export interface Session {
   events: SessionEvent[]
 }
 
+export interface SessionReference {
+  sessionId: string
+  requestId: string | null
+  status: SessionStatus
+  finishedAt: number | null
+  updatedAt: number
+  alertId?: string
+}
+
+export function referenceForSession(session: Session): SessionReference {
+  return {
+    sessionId: session.id,
+    requestId: session.requestId ?? null,
+    status: session.status,
+    finishedAt: session.finishedAt,
+    updatedAt: session.updatedAt,
+  }
+}
+
+export function replyMarker(
+  session: Pick<Session, 'requestId' | 'finishedAt' | 'updatedAt'>,
+): string {
+  return JSON.stringify([session.requestId ?? null, session.finishedAt ?? session.updatedAt])
+}
+
 export const providers: Record<Provider, { name: string; surface: string }> = {
   claude: { name: 'Claude Code', surface: 'Terminal' },
   codex: { name: 'Codex', surface: 'Terminal' },
