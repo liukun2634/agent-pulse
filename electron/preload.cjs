@@ -1,10 +1,28 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('pulse', {
+  getAlerts: () => ipcRenderer.invoke('pulse:get-alerts'),
+  dismissAlert: (id) => ipcRenderer.invoke('pulse:dismiss-alert', id),
+  showAlerts: () => ipcRenderer.invoke('pulse:show-alerts'),
+  hideAlertPopup: (sequence) => ipcRenderer.invoke('pulse:hide-alert-popup', sequence),
+  setSystemNotifications: (enabled) =>
+    ipcRenderer.invoke('pulse:set-system-notifications', enabled),
+  onAlerts: (listener) => {
+    const handler = (_event, state) => listener(state)
+    ipcRenderer.on('pulse:alerts', handler)
+    return () => ipcRenderer.removeListener('pulse:alerts', handler)
+  },
   getSessionFeed: () => ipcRenderer.invoke('pulse:get-session-feed'),
+  setSessionArchived: (id, archived) =>
+    ipcRenderer.invoke('pulse:set-session-archived', id, archived),
   setSessionSource: (source) => ipcRenderer.invoke('pulse:set-session-source', source),
   refreshSessions: () => ipcRenderer.invoke('pulse:refresh-sessions'),
   openVSCode: (id) => ipcRenderer.invoke('pulse:open-vscode', id),
+  onSessionOpened: (listener) => {
+    const handler = (_event, id) => listener(id)
+    ipcRenderer.on('pulse:session-opened', handler)
+    return () => ipcRenderer.removeListener('pulse:session-opened', handler)
+  },
   onSessionFeed: (listener) => {
     const handler = (_event, feed) => listener(feed)
     ipcRenderer.on('pulse:session-feed', handler)

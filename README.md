@@ -49,19 +49,34 @@ Only `vscode` and `vscode-insiders` URL schemes are supported. Missing or unread
 
 ### Status semantics
 
-| Status | Evidence |
-| --- | --- |
-| In progress | A user message, assistant turn or tool event is active, or a newer saved request has started. |
-| Needs input | A known question tool, such as `vscode_askQuestions`, is pending, or the current saved request indicates input is needed. |
-| Completed | A nonempty assistant reply without tool requests is followed by a turn end with no pending tools, or the current saved request records a successful finish. This means the reply ended, not that the task succeeded. |
-| Failed | An explicit `session.error` event, or a finished saved request marked with an error. A failed tool alone does not fail the session because the agent may recover. |
-| Stopped | The current saved request records cancellation. |
-| No recent activity | A previously running session has no new activity for two minutes and no completion signal. The agent may still be working. |
-| Status unknown | Incomplete lifecycle evidence or a partial log update. Silence never implies completion. |
+| Status             | Evidence                                                                                                                                                                                                                                            |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| In progress        | A user message, assistant turn or tool event is active, or a newer saved request has started.                                                                                                                                                       |
+| Needs input        | A known question tool, such as `vscode_askQuestions`, is pending, or the current saved request indicates input is needed.                                                                                                                           |
+| Rely Ready         | A nonempty assistant reply without tool requests is followed by a turn end with no pending tools, or the current saved request records a successful finish. This means output is available, not that the session is archived or the task succeeded. |
+| Failed             | An explicit `session.error` event, or a finished saved request marked with an error. A failed tool alone does not fail the session because the agent may recover.                                                                                   |
+| Stopped            | The current saved request records cancellation.                                                                                                                                                                                                     |
+| No recent activity | A previously running session has no new activity for two minutes and no completion signal. The agent may still be working.                                                                                                                          |
+| Status unknown     | Incomplete lifecycle evidence or a partial log update. Silence never implies completion.                                                                                                                                                            |
 
 These are inferred states from internal, version-dependent files, not an official Copilot lifecycle API or a VS Code process heartbeat. Some permission prompts, cancellations and final responses may not be recorded in either source. Missing completion signals may leave a session idle or unknown; an observed input request can remain waiting until a later update resolves it. Historical transcripts remain visible and are not necessarily open chats. Branch and file-change counts are not inferred, and elapsed time starts at the earliest observed transcript event.
 
-**Open VS Code workspace opens the owning folder/workspace, not an exact chat.** Select the relevant conversation in VS Code to reply or approve permissions. Pulse does not submit messages, inject keystrokes, edit VS Code chat storage or auto-approve requests.
+**Open in VS Code opens the exact conversation when Pulse Companion is connected.** The workspace is brought forward and the companion opens the local chat resource and focuses its input. Without a connected companion, Pulse opens the workspace and explicitly reports the fallback. It does not submit messages, inject keystrokes, edit VS Code chat storage or auto-approve requests.
+
+Package and install the local companion from this repository:
+
+```sh
+npm --prefix vscode-companion run package
+code --install-extension .artifacts/pulse-companion.vsix --force
+```
+
+Run **Pulse: Show Connection Status** in VS Code if the extension has not activated yet. The companion routes by workspace using an authenticated local pipe, not a public network listener. The current internal chat URI format was verified locally; compatibility with other VS Code versions is experimental. See [Pulse Companion](vscode-companion/README.md).
+
+**State-change reminders** are detected in the Electron main process. A monitored session entering Needs input or producing output shows a compact notification at the top center of the display without taking keyboard focus. It fades after about five seconds; hovering pauses the timer. Changes in one batch share a notification instead of cycling through old pending alerts. Fading or closing the notification only hides it: it does not mark output as read, archive the session, or discard pending alerts. The toolbar bell can reopen them. A waiting alert clears when execution resumes. Pulse must remain running, including in the tray, for monitoring to continue.
+
+OS notifications are an optional additional channel in Settings. They default to off to avoid duplicate banners; legacy notification preferences are reset to this quieter default once. Pulse's own top notification remains enabled, without taskbar flashing.
+
+**Rely Ready and Archive session are separate.** Rely Ready is a provider lifecycle state for the latest reply. Archive session is a manual, reversible Pulse collection change. In live Workspace details, use Archive session or Restore session; the collection selector shows unarchived, archived or all sessions. Archive markers are persisted locally without changing provider status, timestamps, source files or monitoring. Active or actionable archived sessions can still appear in the mini monitor. The separate Replies ready section has been removed from Workspace; output status remains on session cards and in status filters. Viewed-reply markers remain separate from archive state.
 
 Live snapshots stay in process memory and are not written to the demo cache. No tool arguments, tool outputs or reasoning text are sent to the renderer. Titles, optional user-message task labels, workspace names and event summaries are local session information; enabling system notifications may expose project/task names on the OS notification surface. The adapter does not upload this data.
 
@@ -74,7 +89,7 @@ Live snapshots stay in process memory and are not written to the demo cache. No 
 - Receive in-app completion alerts; optionally enable system notifications and sound in Settings.
 - Minimize the native workspace, or click Mini monitor, to switch to a side monitor on the current display. The main window hides instead of competing for desktop space.
 - Collapse the side monitor into a narrow task rail; switch between the left and right screen edges.
-- Click a task in either side-monitor layout to restore its detail panel. The side monitor hides when the workspace opens.
+- Click a live task in either side-monitor layout to open it in VS Code. Demo tasks still restore their Pulse detail panel.
 - Use Expand workspace to maximize the full panel; minimizing it returns to the side monitor.
 - Both windows synchronize session state and preferences locally. Live source updates come from one Electron collector; demo changes use local storage. Alerts also appear in the side monitor while the main panel is hidden.
 - Pin either native window above other windows. Browser windows cannot provide system-wide pinning.
@@ -83,7 +98,7 @@ Live snapshots stay in process memory and are not written to the demo cache. No 
 
 System notifications depend on OS notification settings. The browser preview asks for permission only when notifications are enabled. Browser popups must be allowed to open the mini monitor.
 
-The browser preview can display both compact layouts, but cannot read local VS Code sessions or dock, maximize or pin OS windows. Switching modes in the native app controls real windows. Task shortcuts open Pulse's session details; the detail panel has the separate VS Code workspace action.
+The browser preview can display both compact layouts, but cannot read local VS Code sessions or dock, maximize or pin OS windows. Switching modes in the native app controls real windows. Exact conversation navigation requires the native app and Pulse Companion.
 
 Sample data and preferences are stored on the device. Reset demo restores the six sample sessions and is disabled for the VS Code source. No account, telemetry, external fonts or model API key is required.
 

@@ -19,6 +19,7 @@ export interface Session {
   source?: 'vscode'
   statusDetail?: string
   requestId?: string
+  archivedAt?: number
   status: SessionStatus
   startedAt: number
   updatedAt: number
@@ -36,7 +37,7 @@ export const providers: Record<Provider, { name: string; surface: string }> = {
 export const statusLabels: Record<SessionStatus, string> = {
   running: 'In progress',
   waiting: 'Needs input',
-  completed: 'Completed',
+  completed: 'Rely Ready',
   failed: 'Failed',
   disconnected: 'Disconnected',
   unknown: 'Status unknown',

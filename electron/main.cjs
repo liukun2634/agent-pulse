@@ -13,6 +13,9 @@ const {
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { createVSCodeSource } = require('./vscode-sessions.cjs')
+const { openSession } = require('../vscode-companion/bridge.cjs')
+const { createAlertTracker } = require('./session-alerts.cjs')
+const fs = require('node:fs')
 
 const root = path.join(__dirname, '..')
 const entry = path.join(root, 'dist', 'index.html')
@@ -22,6 +25,15 @@ const devUrl = process.env.PULSE_DEV_SERVER_URL
 const windows = new Set()
 let mainWindow
 let miniWindow
+let alertWindow
+let pendingAlerts = []
+let alertRevision = 0
+let popupSequence = 0
+let popupIds = []
+let systemNotifications = false
+const alertTracker = createAlertTracker()
+const nativeNotifications = new Set()
+let archivedSessions = new Map()
 let tray
 let quitting = false
 let windowMode = 'workspace'
@@ -45,8 +57,112 @@ let scanning = false
 let sourceGeneration = 0
 
 function publishFeed(next) {
-  feed = { ...next, revision: feed.revision + 1 }
+  const freshAlerts = next.source === 'vscode' ? alertTracker.update(next.sessions) : []
+  feed = {
+    ...next,
+    sessions: next.sessions.map((item) => ({ ...item, archivedAt: archivedSessions.get(item.id) })),
+    revision: feed.revision + 1,
+  }
   for (const window of windows) window.webContents.send('pulse:session-feed', feed)
+  const previousCount = pendingAlerts.length
+  pendingAlerts = pendingAlerts.filter((alert) => {
+    const current = feed.sessions.find((item) => item.id === alert.sessionId)
+    if (!current || ['unknown', 'disconnected'].includes(current.status)) return true
+    if (alert.requestId && current.requestId && alert.requestId !== current.requestId) return false
+    if (alert.status !== 'waiting' && alert.requestId) return true
+    return current.status === alert.status
+  })
+  for (const alert of freshAlerts) {
+    pendingAlerts = pendingAlerts.filter((item) => item.sessionId !== alert.sessionId)
+    pendingAlerts.push(alert)
+    if (systemNotifications)
+      showSystemNotification({
+        title: alert.title,
+        body: `${alert.project}: ${alert.task}`,
+        sessionId: alert.sessionId,
+      })
+  }
+  if (freshAlerts.length || previousCount !== pendingAlerts.length) publishAlerts()
+  if (freshAlerts.length) showAlertWindow(freshAlerts.map((alert) => alert.id))
+}
+
+function alertState() {
+  return {
+    items: pendingAlerts,
+    revision: alertRevision,
+    systemNotifications,
+    popup: { sequence: popupSequence, ids: popupIds },
+  }
+}
+
+function publishAlerts() {
+  alertRevision++
+  for (const window of windows) window.webContents.send('pulse:alerts', alertState())
+  if (
+    !pendingAlerts.some((alert) => popupIds.includes(alert.id)) &&
+    alertWindow &&
+    !alertWindow.isDestroyed()
+  )
+    alertWindow.hide()
+  if (tray)
+    tray.setToolTip(
+      pendingAlerts.length
+        ? `Pulse - ${pendingAlerts.length} pending alerts`
+        : 'Pulse - Agent sessions',
+    )
+}
+
+function showAlertWindow(ids = pendingAlerts.map((alert) => alert.id)) {
+  popupIds = ids.filter((id) => pendingAlerts.some((alert) => alert.id === id))
+  if (!popupIds.length) return
+  popupSequence++
+  publishAlerts()
+  const reveal = () => {
+    if (!pendingAlerts.length || alertWindow.isDestroyed()) return
+    const anchor = windowMode === 'mini' ? miniWindow : mainWindow
+    const area =
+      anchor && !anchor.isDestroyed()
+        ? screen.getDisplayMatching(anchor.getBounds()).workArea
+        : screen.getPrimaryDisplay().workArea
+    const bounds = alertWindow.getBounds()
+    alertWindow.setPosition(area.x + Math.round((area.width - bounds.width) / 2), area.y + 16)
+    alertWindow.showInactive()
+  }
+  if (alertWindow && !alertWindow.isDestroyed()) {
+    if (!alertWindow.webContents.isLoading()) reveal()
+    return
+  }
+  alertWindow = new BrowserWindow({
+    width: Math.min(520, screen.getPrimaryDisplay().workArea.width - 32),
+    height: 112,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    title: 'Pulse - Session alert',
+    icon: iconPath,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+    },
+  })
+  secureWindow(alertWindow)
+  alertWindow.once('ready-to-show', reveal)
+  alertWindow.on('close', (event) => {
+    if (!quitting) {
+      event.preventDefault()
+      alertWindow.hide()
+    }
+  })
+  void loadWindow(alertWindow, 'alerts')
 }
 
 async function refreshFeed(force = false) {
@@ -103,13 +219,13 @@ function secureWindow(window) {
   })
 }
 
-function loadWindow(window, mini = false) {
+function loadWindow(window, view = '') {
   if (devUrl) {
     const target = new URL(devUrl)
-    if (mini) target.searchParams.set('view', 'mini')
+    if (view) target.searchParams.set('view', view)
     return window.loadURL(target.href)
   }
-  return window.loadFile(entry, mini ? { query: { view: 'mini' } } : {})
+  return window.loadFile(entry, view ? { query: { view } } : {})
 }
 
 function createMain() {
@@ -236,7 +352,7 @@ function showMini() {
   })
   secureWindow(miniWindow)
   miniWindow.once('ready-to-show', reveal)
-  void loadWindow(miniWindow, true)
+  void loadWindow(miniWindow, 'mini')
 }
 
 function trustedWindow(event) {
@@ -248,15 +364,69 @@ function trustedWindow(event) {
 }
 
 ipcMain.handle('pulse:get-pinned', (event) => trustedWindow(event).isAlwaysOnTop())
+ipcMain.handle('pulse:get-alerts', (event) => {
+  trustedWindow(event)
+  return alertState()
+})
+ipcMain.handle('pulse:dismiss-alert', (event, id) => {
+  trustedWindow(event)
+  if (typeof id !== 'string') throw new TypeError('Invalid alert ID.')
+  pendingAlerts = pendingAlerts.filter((alert) => alert.id !== id)
+  publishAlerts()
+})
+ipcMain.handle('pulse:show-alerts', (event) => {
+  trustedWindow(event)
+  showAlertWindow()
+})
+ipcMain.handle('pulse:hide-alert-popup', (event, sequence) => {
+  if (trustedWindow(event) !== alertWindow) throw new Error('Invalid popup window.')
+  if (sequence === popupSequence) alertWindow.hide()
+})
+ipcMain.handle('pulse:set-system-notifications', (event, enabled) => {
+  trustedWindow(event)
+  if (typeof enabled !== 'boolean') throw new TypeError('Invalid notification setting.')
+  fs.mkdirSync(app.getPath('userData'), { recursive: true })
+  fs.writeFileSync(
+    path.join(app.getPath('userData'), 'notification-settings.json'),
+    JSON.stringify({ version: 2, systemNotifications: enabled }),
+  )
+  systemNotifications = enabled
+  publishAlerts()
+  return alertState()
+})
 ipcMain.handle('pulse:get-session-feed', (event) => {
   trustedWindow(event)
   return feed
+})
+ipcMain.handle('pulse:set-session-archived', (event, id, archived) => {
+  trustedWindow(event)
+  if (
+    feed.source !== 'vscode' ||
+    typeof archived !== 'boolean' ||
+    !feed.sessions.some((item) => item.id === id)
+  )
+    throw new TypeError('Invalid archive request.')
+  const next = new Map(archivedSessions)
+  if (archived) next.set(id, Date.now())
+  else next.delete(id)
+  const filename = path.join(app.getPath('userData'), 'session-management.json')
+  fs.mkdirSync(app.getPath('userData'), { recursive: true })
+  fs.writeFileSync(
+    `${filename}.tmp`,
+    JSON.stringify({ version: 1, archived: Object.fromEntries(next) }),
+  )
+  fs.renameSync(`${filename}.tmp`, filename)
+  archivedSessions = next
+  publishFeed(feed)
 })
 ipcMain.handle('pulse:set-session-source', (event, source) => {
   trustedWindow(event)
   if (!['demo', 'vscode'].includes(source)) throw new TypeError('Invalid session source.')
   if (source !== feed.source) {
     sourceGeneration++
+    alertTracker.reset()
+    pendingAlerts = []
+    publishAlerts()
     publishFeed({
       source,
       state: source === 'demo' ? 'demo' : 'connecting',
@@ -271,17 +441,33 @@ ipcMain.handle('pulse:refresh-sessions', (event) => {
   trustedWindow(event)
   return refreshFeed(true)
 })
-ipcMain.handle('pulse:open-vscode', async (event, id) => {
-  trustedWindow(event)
+async function openVSCodeSession(id) {
   if (
     feed.source !== 'vscode' ||
     typeof id !== 'string' ||
     !feed.sessions.some((item) => item.id === id)
   )
     throw new TypeError('Unknown VS Code session.')
-  const uri = vscodeSource.workspaceUri(id)
-  if (!uri) throw new Error('The workspace is no longer available.')
-  await shell.openExternal(uri)
+  const target = vscodeSource.sessionTarget(id)
+  if (!target) throw new Error('The workspace is no longer available.')
+  await shell.openExternal(target.uri)
+  try {
+    await openSession(target.workspacePath, target.scheme, target.sessionId)
+    pendingAlerts = pendingAlerts.filter((alert) => alert.sessionId !== id)
+    publishAlerts()
+    for (const window of windows) window.webContents.send('pulse:session-opened', id)
+    return { mode: 'session' }
+  } catch {
+    return {
+      mode: 'workspace',
+      message:
+        'Workspace opened. Install or activate Pulse Companion to open the exact conversation.',
+    }
+  }
+}
+ipcMain.handle('pulse:open-vscode', async (event, id) => {
+  trustedWindow(event)
+  return openVSCodeSession(id)
 })
 ipcMain.handle('pulse:set-pinned', (event, pinned) => {
   if (typeof pinned !== 'boolean') throw new TypeError('Expected a boolean.')
@@ -321,10 +507,7 @@ ipcMain.handle('pulse:expand-workspace', (event) => {
   trustedWindow(event)
   showMain(undefined, true)
 })
-ipcMain.handle('pulse:notify', (event, payload) => {
-  trustedWindow(event)
-  if (!payload || typeof payload.title !== 'string' || typeof payload.body !== 'string')
-    throw new TypeError('Invalid notification.')
+function showSystemNotification(payload) {
   if (!Notification.isSupported() || testMode) return
   const notification = new Notification({
     title: payload.title.slice(0, 120),
@@ -332,8 +515,30 @@ ipcMain.handle('pulse:notify', (event, payload) => {
     icon: iconPath,
     silent: true,
   })
-  notification.on('click', () => showMain())
+  nativeNotifications.add(notification)
+  notification.on('close', () => nativeNotifications.delete(notification))
+  notification.on('failed', () => nativeNotifications.delete(notification))
+  const sessionId =
+    typeof payload.sessionId === 'string' &&
+    feed.sessions.some((item) => item.id === payload.sessionId)
+      ? payload.sessionId
+      : undefined
+  notification.on('click', () => {
+    if (sessionId)
+      void openVSCodeSession(sessionId)
+        .then((result) => {
+          if (result.mode !== 'session') showMain(sessionId)
+        })
+        .catch(() => showMain(sessionId))
+    else showMain()
+  })
   notification.show()
+}
+ipcMain.handle('pulse:notify', (event, payload) => {
+  trustedWindow(event)
+  if (!payload || typeof payload.title !== 'string' || typeof payload.body !== 'string')
+    throw new TypeError('Invalid notification.')
+  if (feed.source === 'demo') showSystemNotification(payload)
 })
 
 function createTray() {
@@ -356,6 +561,24 @@ if (!testMode && !app.requestSingleInstanceLock()) app.quit()
 else {
   app.on('second-instance', () => showMain())
   app.whenReady().then(() => {
+    try {
+      const saved = JSON.parse(
+        fs.readFileSync(path.join(app.getPath('userData'), 'session-management.json'), 'utf8'),
+      )
+      if (saved.version === 1 && saved.archived && typeof saved.archived === 'object')
+        archivedSessions = new Map(
+          Object.entries(saved.archived).filter(
+            ([id, at]) =>
+              id.startsWith('vscode:') && typeof at === 'number' && Number.isFinite(at) && at > 0,
+          ),
+        )
+    } catch {}
+    try {
+      const saved = JSON.parse(
+        fs.readFileSync(path.join(app.getPath('userData'), 'notification-settings.json'), 'utf8'),
+      )
+      systemNotifications = saved.version === 2 && saved.systemNotifications === true
+    } catch {}
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) =>
       callback(false),
     )

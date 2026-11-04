@@ -12,8 +12,63 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { tmpdir } = require('node:os')
 const { pathToFileURL } = require('node:url')
+const { createAlertTracker } = require('../electron/session-alerts.cjs')
 
 const now = Date.parse('2026-11-03T10:00:00Z')
+test('background alerts fire once for input and completion, not initial history or repeated polls', () => {
+  const tracker = createAlertTracker()
+  const session = {
+    id: 'one',
+    project: 'project',
+    task: 'task',
+    requestId: 'request-1',
+    status: 'running',
+  }
+  assert.deepEqual(
+    tracker.update([{ ...session, id: 'history', status: 'completed' }, session]),
+    [],
+  )
+  assert.equal(tracker.update([{ ...session, status: 'waiting' }])[0].status, 'waiting')
+  assert.deepEqual(tracker.update([{ ...session, status: 'waiting', updatedAt: now + 1000 }]), [])
+  assert.deepEqual(tracker.update([{ ...session, status: 'unknown' }]), [])
+  assert.deepEqual(tracker.update([{ ...session, status: 'waiting' }]), [])
+  tracker.update([session])
+  assert.equal(tracker.update([{ ...session, status: 'waiting' }]).length, 1)
+  assert.equal(
+    tracker.update([{ ...session, status: 'completed', finishedAt: now }])[0].status,
+    'completed',
+  )
+  assert.deepEqual(tracker.update([{ ...session, status: 'completed', finishedAt: now + 100 }]), [])
+  assert.deepEqual(tracker.update([{ ...session, status: 'idle', requestId: undefined }]), [])
+  assert.deepEqual(tracker.update([{ ...session, status: 'completed', finishedAt: now + 100 }]), [])
+  assert.equal(
+    tracker.update([{ ...session, requestId: 'request-2', status: 'completed' }]).length,
+    1,
+  )
+})
+
+test('multiple sessions produce separate alerts and temporary missing data does not lose transitions', () => {
+  const tracker = createAlertTracker()
+  const sessions = ['one', 'two'].map((id) => ({
+    id,
+    project: id,
+    task: 'task',
+    status: 'running',
+  }))
+  tracker.update(sessions)
+  tracker.update([])
+  const alerts = tracker.update([
+    { ...sessions[0], status: 'completed' },
+    { ...sessions[1], status: 'waiting' },
+  ])
+  assert.deepEqual(
+    alerts.map((alert) => alert.status),
+    ['completed', 'waiting'],
+  )
+  tracker.reset()
+  assert.deepEqual(tracker.update([{ ...sessions[0], status: 'completed' }]), [])
+})
+
 function feed(state, type, data = {}, offset = 0) {
   applyEvent(state, { type, data, timestamp: new Date(now + offset).toISOString() })
 }
@@ -63,11 +118,23 @@ test('saved request completion overrides an unfinished transcript and a new requ
   const state = createTranscript('saved', 'project')
   feed(state, 'assistant.turn_start')
   const chat = {}
-  applyChatEvent(chat, { kind: 2, k: ['requests'], v: [{ requestId: 'first', timestamp: now, modelState: { value: 0 } }] })
-  applyChatEvent(chat, { kind: 1, k: ['requests', 0, 'modelState'], v: { value: 1, completedAt: now + 1000 } })
+  applyChatEvent(chat, {
+    kind: 2,
+    k: ['requests'],
+    v: [{ requestId: 'first', timestamp: now, modelState: { value: 0 } }],
+  })
+  applyChatEvent(chat, {
+    kind: 1,
+    k: ['requests', 0, 'modelState'],
+    v: { value: 1, completedAt: now + 1000 },
+  })
   assert.equal(toSession(state, now + 200000, chat).status, 'completed')
   assert.equal(toSession(state, now + 200000, chat).finishedAt, now + 1000)
-  applyChatEvent(chat, { kind: 2, k: ['requests'], v: [{ requestId: 'second', timestamp: now + 300000, modelState: { value: 0 } }] })
+  applyChatEvent(chat, {
+    kind: 2,
+    k: ['requests'],
+    v: [{ requestId: 'second', timestamp: now + 300000, modelState: { value: 0 } }],
+  })
   assert.equal(toSession(state, now + 300000, chat).status, 'running')
   assert.equal(toSession(state, now + 300000, chat).finishedAt, null)
 })

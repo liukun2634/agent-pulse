@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -252,7 +259,7 @@ test(
           globalThis.pulseTestOpenedUri = uri
         }
       })
-      await main.getByRole('button', { name: 'Open VS Code workspace', exact: true }).click()
+      await main.getByRole('button', { name: 'Open in VS Code', exact: true }).click()
       assert.equal(
         await application.evaluate(() => globalThis.pulseTestOpenedUri),
         `vscode://file${pathToFileURL(projectPath).pathname}`,
@@ -272,17 +279,20 @@ test(
         timeout: 10000,
       })
       await expect(mini.locator('.mini-session .status-badge')).toHaveText('Needs input')
-      await expect(mini.locator('.toast')).toContainText('Input needed in VS Code')
+      assert.equal((await mini.evaluate(() => window.pulse.getAlerts())).items[0].status, 'waiting')
       await expect(main.getByRole('button', { name: 'Approve in demo' })).toHaveCount(0)
 
       append('tool.execution_complete', { toolCallId: 'question-one', success: true })
       append('assistant.message', { content: 'Reply finished' })
       append('assistant.turn_end')
-      await expect(mini.locator('.mini-session .status-badge')).toHaveText('Completed', {
+      await expect(mini.locator('.mini-session .status-badge')).toHaveText('Rely Ready', {
         timeout: 10000,
       })
-      await expect(main.locator('.inspector > .status-badge')).toHaveText('Completed')
-      await expect(mini.locator('.toast')).toContainText('Assistant reply finished')
+      await expect(main.locator('.inspector > .status-badge')).toHaveText('Rely Ready')
+      assert.equal(
+        (await mini.evaluate(() => window.pulse.getAlerts())).items[0].status,
+        'completed',
+      )
       const updatedAt = await main.evaluate(
         async () => (await window.pulse.getSessionFeed()).sessions[0].updatedAt,
       )
@@ -347,6 +357,197 @@ test(
       await expect(main.locator('.session-card')).toHaveCount(0)
       await expect(main.locator('.source-summary')).toContainText('No Copilot transcripts found.')
       assert.deepEqual(errors, [])
+    } finally {
+      if (application) await application.close()
+      rmSync(temporary, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    }
+  },
+)
+
+test(
+  'top notifications fade without losing alerts and archiving stays separate',
+  { timeout: 45000 },
+  async () => {
+    const temporary = mkdtempSync(path.join(tmpdir(), 'pulse-alert-test-'))
+    const storage = path.join(temporary, 'storage')
+    const workspace = path.join(storage, 'workspace-one')
+    const transcripts = path.join(workspace, 'GitHub.copilot-chat', 'transcripts')
+    const chats = path.join(workspace, 'chatSessions')
+    mkdirSync(transcripts, { recursive: true })
+    mkdirSync(chats, { recursive: true })
+    writeFileSync(
+      path.join(workspace, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL(temporary).href }),
+    )
+    const timestamp = Date.now()
+    writeFileSync(
+      path.join(transcripts, 'one.jsonl'),
+      JSON.stringify({
+        type: 'assistant.turn_start',
+        data: {},
+        timestamp: new Date(timestamp).toISOString(),
+      }) + '\n',
+    )
+    const chat = path.join(chats, 'one.jsonl')
+    writeFileSync(
+      chat,
+      JSON.stringify({
+        kind: 0,
+        v: {
+          customTitle: 'Finish the monitored task',
+          requests: [{ requestId: 'request-one', timestamp, modelState: { value: 0 } }],
+        },
+      }) + '\n',
+    )
+    const setState = (state) =>
+      appendFileSync(
+        chat,
+        JSON.stringify({ kind: 1, k: ['requests', 0, 'modelState'], v: state }) + '\n',
+      )
+    const environment = {
+      ...process.env,
+      PULSE_TEST_MODE: '1',
+      PULSE_TEST_DATA: path.join(temporary, 'app'),
+      PULSE_VSCODE_STORAGE: storage,
+    }
+    delete environment.ELECTRON_RUN_AS_NODE
+    delete environment.PULSE_DEV_SERVER_URL
+    let application
+    try {
+      application = await electron.launch({ args: [process.cwd()], env: environment })
+      const main = await application.firstWindow()
+      await expect(main.locator('.session-running')).toHaveCount(1)
+      await expect(main.locator('.ready-replies')).toHaveCount(0)
+      const original = (await main.evaluate(() => window.pulse.getSessionFeed())).sessions[0]
+      await main.getByRole('button', { name: 'Archive session', exact: true }).click()
+      await expect(main.locator('.session-card')).toHaveCount(0)
+      const archived = (await main.evaluate(() => window.pulse.getSessionFeed())).sessions[0]
+      assert.equal(archived.status, original.status)
+      assert.equal(archived.updatedAt, original.updatedAt)
+      assert.ok(archived.archivedAt)
+      assert.equal(
+        JSON.parse(readFileSync(path.join(temporary, 'app', 'session-management.json'), 'utf8'))
+          .archived[original.id],
+        archived.archivedAt,
+      )
+      assert.equal((await main.evaluate(() => window.pulse.getAlerts())).items.length, 0)
+      await main.getByRole('combobox', { name: 'Session collection' }).selectOption('archived')
+      await main.locator('.session-card').first().click()
+      assert.equal(await main.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
+      mkdirSync('.artifacts', { recursive: true })
+      await main.screenshot({ path: '.artifacts/workspace-archived.png', animations: 'disabled', scale: 'css' })
+      await main.getByRole('button', { name: 'Restore session', exact: true }).click()
+      await expect(main.locator('.session-card')).toHaveCount(0)
+      await main.getByRole('combobox', { name: 'Session collection' }).selectOption('active')
+      await expect(main.locator('.session-running')).toHaveCount(1)
+      await main.getByRole('button', { name: 'Archive session', exact: true }).click()
+      await main.evaluate(() => window.pulse.setSystemNotifications(false))
+      await application.evaluate(async ({ BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows()[0]
+        window.hide()
+        await window.loadURL('about:blank')
+      })
+
+      const popup = application.waitForEvent('window')
+      setState({ value: 4 })
+      const reminder = await popup
+      await expect(reminder.locator('h1')).toHaveText('Input needed in VS Code')
+      await reminder.clock.install()
+      const geometry = await application.evaluate(({ BrowserWindow, screen }) => {
+        const window = BrowserWindow.getAllWindows().find((item) =>
+          item.webContents.getURL().includes('view=alerts'),
+        )
+        const bounds = window.getBounds()
+        const area = screen.getDisplayMatching(bounds).workArea
+        return {
+          top: bounds.y - area.y,
+          center: bounds.x + bounds.width / 2 - (area.x + area.width / 2),
+          height: bounds.height,
+        }
+      })
+      assert.ok(Math.abs(geometry.top - 16) <= 3)
+      assert.ok(Math.abs(geometry.center) <= 3)
+      assert.ok(geometry.height <= 120)
+      assert.equal(
+        await application.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()
+            .find((window) => window.webContents.getURL().includes('view=alerts'))
+            .isFocused(),
+        ),
+        false,
+      )
+      await reminder.evaluate(() => window.pulse.refreshSessions())
+      assert.equal((await reminder.evaluate(() => window.pulse.getAlerts())).items.length, 1)
+
+      setState({ value: 1, completedAt: Date.now() })
+      await expect(reminder.locator('h1')).toHaveText('Rely Ready', { timeout: 10000 })
+      assert.ok(
+        (await reminder.evaluate(() => window.pulse.getSessionFeed())).sessions[0].archivedAt,
+      )
+      assert.equal((await reminder.evaluate(() => window.pulse.getAlerts())).items.length, 1)
+      assert.equal(
+        await reminder.evaluate(() => document.documentElement.scrollWidth > innerWidth),
+        false,
+      )
+      mkdirSync('.artifacts', { recursive: true })
+      await reminder.screenshot({
+        path: '.artifacts/top-notification.png',
+        animations: 'disabled',
+        scale: 'css',
+      })
+      const previousSequence = (await reminder.evaluate(() => window.pulse.getAlerts())).popup
+        .sequence
+      await reminder.clock.fastForward(5000)
+      await expect(reminder.locator('.alert-window')).toHaveClass(/alert-fading/)
+      await reminder.clock.fastForward(400)
+      await expect
+        .poll(async () =>
+          application.evaluate(({ BrowserWindow }) =>
+            BrowserWindow.getAllWindows()
+              .find((window) => window.webContents.getURL().includes('view=alerts'))
+              .isVisible(),
+          ),
+        )
+        .toBe(false)
+      assert.equal((await reminder.evaluate(() => window.pulse.getAlerts())).items.length, 1)
+
+      writeFileSync(
+        path.join(transcripts, 'two.jsonl'),
+        JSON.stringify({
+          type: 'assistant.message',
+          data: { toolRequests: [{ toolCallId: 'question-two', name: 'vscode_askQuestions' }] },
+          timestamp: new Date().toISOString(),
+        }) + '\n',
+      )
+      await expect(reminder.locator('h1')).toHaveText('Input needed in VS Code', { timeout: 10000 })
+      assert.equal((await reminder.evaluate(() => window.pulse.getAlerts())).items.length, 2)
+      await reminder.evaluate((sequence) => window.pulse.hideAlertPopup(sequence), previousSequence)
+      assert.equal(
+        await application.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()
+            .find((window) => window.webContents.getURL().includes('view=alerts'))
+            .isVisible(),
+        ),
+        true,
+      )
+      await reminder.getByRole('button', { name: 'Hide notification', exact: true }).click()
+      await expect
+        .poll(async () =>
+          application.evaluate(({ BrowserWindow }) =>
+            BrowserWindow.getAllWindows()
+              .find((window) => window.webContents.getURL().includes('view=alerts'))
+              .isVisible(),
+          ),
+        )
+        .toBe(false)
+      assert.equal((await reminder.evaluate(() => window.pulse.getAlerts())).items.length, 2)
+      await reminder.evaluate(() => window.pulse.showAlerts())
+      await expect(reminder.locator('.alert-more')).toHaveText('+1 more')
+      const currentAlerts = (await reminder.evaluate(() => window.pulse.getAlerts())).items
+      await reminder.evaluate((id) => window.pulse.dismissAlert(id), currentAlerts[0].id)
+      appendFileSync(path.join(transcripts, 'two.jsonl'), JSON.stringify({ type: 'tool.execution_complete', data: { toolCallId: 'question-two', success: true }, timestamp: new Date().toISOString() }) + '\n')
+      await expect.poll(async () => (await reminder.evaluate(() => window.pulse.getAlerts())).items.length).toBe(0)
+      assert.equal(await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().includes('view=alerts')).isVisible()), false)
     } finally {
       if (application) await application.close()
       rmSync(temporary, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })

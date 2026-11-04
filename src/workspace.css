@@ -802,9 +802,30 @@ h1 {
   color: #a26d55;
 }
 .status-badge.disconnected,
+.status-badge.idle,
+.status-badge.cancelled,
 .status-badge.unknown {
   background: #edefec;
   color: #75876c;
+}
+.archive-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: #6b7378;
+  padding: 4px 6px;
+  border: 1px solid #d9dfe0;
+  border-radius: 4px;
+}
+.inspector > .archive-badge {
+  margin-left: 6px;
+}
+.collection-select {
+  max-width: 155px;
+}
+.toolbar-right {
+  flex-wrap: wrap;
 }
 .duration {
   color: #839c6e;
@@ -813,6 +834,24 @@ h1 {
   align-items: center;
   font: 9px var(--mono);
   white-space: nowrap;
+}
+.session-card-bottom {
+  flex-wrap: wrap;
+}
+.mini-ready-count {
+  color: #35634d;
+  font: 11px var(--mono);
+  white-space: nowrap;
+}
+.session-progress,
+.mini-progress {
+  margin: 8px 0 0;
+  color: #69756e;
+  font-size: 10px;
+  line-height: 1.4;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .duration svg {
   color: #9bb087;
@@ -1729,11 +1768,12 @@ body:has(.mini-rail) {
   padding: 0 18px;
 }
 .mini-session {
-  padding: 15px 0;
+  padding: 14px 0;
   width: 100%;
-  display: flex;
-  align-items: flex-start;
-  gap: 11px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 14px;
+  align-items: start;
+  gap: 10px;
   background: none;
   border: 0;
   border-bottom: 1px solid #e6edd7;
@@ -1742,39 +1782,63 @@ body:has(.mini-rail) {
 .mini-session:hover {
   background: #f5f8ee;
 }
-.mini-provider {
-  padding-top: 2px;
-}
 .mini-session-content {
-  flex: 1;
   min-width: 0;
 }
-.mini-session-content > strong {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  color: #54762c;
-}
-.mini-session-content > span:not(.status-badge) {
-  display: block;
-  font-size: 11px;
-  line-height: 1.6;
-  margin-top: 3px;
-  color: #82a65c;
+.mini-session-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   overflow-wrap: anywhere;
+  min-height: 39px;
+  font:
+    600 13px/1.5 'Manrope',
+    sans-serif;
+  color: var(--ink);
 }
-.mini-session-content > .status-badge {
+.mini-session-folder {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 17px;
+  margin-top: 5px;
+  font-size: 10px;
+  color: var(--secondary);
+}
+.mini-session-folder > svg,
+.mini-session-folder > .provider-icon {
+  flex-shrink: 0;
+}
+.mini-session-folder > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mini-session-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-top: 8px;
+}
+.mini-session-meta .status-badge {
   font-size: 9px;
 }
 .mini-session-end {
   font: 9px var(--mono);
-  color: #86b064;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 11px;
-  padding-top: 2px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.mini-session-open {
+  margin-top: 3px;
+  color: var(--muted);
+}
+.mini-session-content > .mini-progress {
+  display: block;
+  min-height: 14px;
 }
 .mini-footer {
   padding: 15px 19px;

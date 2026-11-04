@@ -2,6 +2,8 @@ import { useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } fro
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
 import {
   Activity,
+  Archive,
+  ArchiveRestore,
   ArrowUpRight,
   Bell,
   BellRing,
@@ -64,6 +66,7 @@ import './workspace.css'
 
 const STORAGE_KEY = 'pulse.demo.sessions.v1'
 const SETTINGS_KEY = 'pulse.preferences.v1'
+const SEEN_KEY = 'pulse.seen-replies.v1'
 const desktop = window.pulse
 const miniMode = new URLSearchParams(window.location.search).get('view') === 'mini'
 
@@ -114,12 +117,27 @@ function initialPreferences(): Preferences {
       localStorage.getItem(SETTINGS_KEY) ?? 'null',
     ) as Partial<Preferences> | null
     return {
-      notifications: saved?.notifications === true,
+      notifications: saved?.notifications ?? !!desktop,
       sound: saved?.sound === true,
       showCompleted: saved?.showCompleted !== false,
     }
   } catch {
     return { notifications: false, sound: false, showCompleted: true }
+  }
+}
+
+function initialSeen(): Record<string, number> {
+  try {
+    const value = JSON.parse(localStorage.getItem(SEEN_KEY) ?? '{}')
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(
+          Object.entries(value)
+            .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
+            .slice(-200),
+        )
+      : {}
+  } catch {
+    return {}
   }
 }
 
@@ -159,9 +177,11 @@ function StatusBadge({ status }: { status: SessionStatus }) {
         ? CirclePause
         : status === 'completed'
           ? CircleCheck
-          : status === 'disconnected'
-            ? WifiOff
-            : TriangleAlert
+          : status === 'idle' || status === 'cancelled'
+            ? CirclePause
+            : status === 'disconnected'
+              ? WifiOff
+              : TriangleAlert
   return (
     <span className={`status-badge ${status}`}>
       <Icon size={12} className={status === 'running' ? 'spin' : ''} />
@@ -260,6 +280,12 @@ function SessionCard({
       </div>
       <div className="session-card-bottom">
         <StatusBadge status={session.status} />
+        {session.archivedAt && (
+          <span className="archive-badge">
+            <Archive size={11} />
+            Archived
+          </span>
+        )}
         <span
           className="duration"
           title={
@@ -270,6 +296,11 @@ function SessionCard({
           {session.source === 'vscode' ? `Idle ${idleTime(session, now)}` : elapsed(session, now)}
         </span>
       </div>
+      {session.source === 'vscode' && (
+        <p className="session-progress" title={session.events.at(-1)?.text}>
+          {session.events.at(-1)?.text}
+        </p>
+      )}
     </button>
   )
 }
@@ -290,6 +321,7 @@ function Workspace() {
   const [filter, setFilter] = useState<SessionFilter>('all')
   const [provider, setProvider] = useState<Provider | 'all'>('all')
   const [query, setQuery] = useState('')
+  const [collection, setCollection] = useState<'active' | 'archived' | 'all'>('active')
   const [view, setView] = useState<'sessions' | 'activity'>('sessions')
   const [layout, setLayout] = useState<'grid' | 'list'>('grid')
   const [modal, setModal] = useState<Modal>(null)
@@ -298,6 +330,12 @@ function Workspace() {
   const [miniState, setMiniState] = useState<PulseMiniState>({ collapsed: false, edge: 'right' })
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [simulatingId, setSimulatingId] = useState<string | null>(null)
+  const [seenReplies, setSeenReplies] = useState(initialSeen)
+  const [alerts, setAlerts] = useState<PulseAlertState>({
+    items: [],
+    revision: -1,
+    systemNotifications: true,
+  })
   const storageUnavailable = useSyncExternalStore(subscribeStorageHealth, getStorageFailure)
   const [now, setNow] = useState(Date.now)
   const dialogRef = useRef<HTMLDialogElement>(null)
@@ -312,45 +350,10 @@ function Workspace() {
       setFilter('all')
       setProvider('all')
       setQuery('')
+      setCollection('active')
       setToast(null)
     }
     if (incoming.source === 'vscode') {
-      const changes =
-        !sourceChanged && feed.scannedAt !== null
-          ? incoming.sessions.filter(
-              (item) =>
-                ['waiting', 'completed', 'failed'].includes(item.status) &&
-                (sessions.some(
-                  (previous) => previous.id === item.id && previous.status !== item.status,
-                ) ||
-                  (item.status === 'waiting' &&
-                    !sessions.some((previous) => previous.id === item.id))),
-            )
-          : []
-      const changed = changes[0]
-      if (changed) {
-        const title =
-          changed.status === 'waiting'
-            ? 'Input needed in VS Code'
-            : changed.status === 'completed'
-              ? 'Assistant reply finished'
-              : 'Session reported an error'
-        setToast({
-          title,
-          detail:
-            changes.length > 1
-              ? `${changed.project} + ${changes.length - 1} other sessions`
-              : changed.project,
-          sessionId: changed.id,
-          tone: changed.status === 'completed' ? 'success' : 'info',
-        })
-        if (!miniMode && preferences.notifications)
-          for (const item of changes)
-            void desktop
-              ?.notify({ title: statusLabels[item.status], body: `${item.project}: ${item.task}` })
-              .catch(() => {})
-        if (!miniMode && preferences.sound) playSound()
-      }
       setSessions(incoming.sessions)
       if (
         sourceChanged ||
@@ -364,6 +367,62 @@ function Workspace() {
     }
     setFeed(incoming)
   })
+
+  const receiveAlerts = useEffectEvent((incoming: PulseAlertState) => {
+    if (incoming.revision <= alerts.revision) return
+    if (
+      !miniMode &&
+      preferences.sound &&
+      alerts.revision >= 0 &&
+      incoming.items.some((item) => !alerts.items.some((previous) => previous.id === item.id))
+    )
+      playSound()
+    setAlerts(incoming)
+    setPreferences((previous) =>
+      previous.notifications === incoming.systemNotifications
+        ? previous
+        : { ...previous, notifications: incoming.systemNotifications },
+    )
+  })
+
+  useEffect(() => {
+    if (!desktop?.getAlerts) return
+    let active = true
+    const accept = (incoming: PulseAlertState) => {
+      if (active) receiveAlerts(incoming)
+    }
+    const unsubscribe = desktop.onAlerts(accept)
+    void desktop.getAlerts().then(accept)
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }, [])
+
+  const markOpened = useEffectEvent((id: string) => {
+    const session = sessions.find((item) => item.id === id)
+    if (session?.status === 'completed')
+      setSeenReplies((current) => ({ ...current, [id]: session.finishedAt ?? session.updatedAt }))
+  })
+
+  useEffect(() => desktop?.onSessionOpened(markOpened), [])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SEEN_KEY,
+        JSON.stringify(
+          Object.fromEntries(
+            Object.entries(seenReplies)
+              .sort((first, second) => second[1] - first[1])
+              .slice(0, 200),
+          ),
+        ),
+      )
+    } catch {
+      reportStorageFailure()
+    }
+  }, [seenReplies])
 
   useEffect(() => {
     if (!desktop) return
@@ -426,11 +485,30 @@ function Workspace() {
 
   async function openVSCode(id: string) {
     try {
-      await desktop?.openVSCode(id)
+      const result = await desktop?.openVSCode(id)
+      if (result?.mode === 'workspace')
+        setToast({
+          title: 'Workspace opened',
+          detail: result.message ?? 'Pulse Companion is not connected.',
+          tone: 'info',
+        })
     } catch {
       setToast({
         title: 'VS Code could not be opened',
         detail: 'The workspace or VS Code URL handler is unavailable.',
+        tone: 'info',
+      })
+    }
+  }
+
+  async function archiveSession(session: Session) {
+    try {
+      await desktop?.setSessionArchived(session.id, !session.archivedAt)
+      if (!session.archivedAt && collection === 'active') setSelectedId(null)
+    } catch {
+      setToast({
+        title: 'Archive could not be updated',
+        detail: 'The session or local storage is unavailable.',
         tone: 'info',
       })
     }
@@ -484,6 +562,7 @@ function Workspace() {
         if (incoming) receiveSessions(incoming)
       }
       if (event.key === SETTINGS_KEY) setPreferences(initialPreferences())
+      if (event.key === SEEN_KEY) setSeenReplies(initialSeen())
     }
     window.addEventListener('storage', receive)
     return () => window.removeEventListener('storage', receive)
@@ -553,8 +632,21 @@ function Workspace() {
     ['waiting', 'failed', 'disconnected', 'unknown'].includes(session.status),
   )
   const completed = sessions.filter((session) => session.status === 'completed')
+  const ready = completed.filter(
+    (session) => live && seenReplies[session.id] !== (session.finishedAt ?? session.updatedAt),
+  )
   const visible = filterSessions(sessions, query, filter, provider).filter(
-    (session) => preferences.showCompleted || session.status !== 'completed',
+    (session) =>
+      (!live ||
+        collection === 'all' ||
+        (collection === 'archived' ? !!session.archivedAt : !session.archivedAt)) &&
+      (collection === 'archived' || preferences.showCompleted || session.status !== 'completed'),
+  )
+  const miniSessions = sessions.filter(
+    (session) =>
+      !session.archivedAt ||
+      ['running', 'waiting', 'failed', 'unknown'].includes(session.status) ||
+      ready.some((item) => item.id === session.id),
   )
   const allEvents = sessions
     .flatMap((session) => session.events.map((event) => ({ ...event, session })))
@@ -680,6 +772,18 @@ function Workspace() {
   }
 
   async function enableNotifications(enabled: boolean) {
+    if (desktop) {
+      try {
+        await desktop.setSystemNotifications(enabled)
+      } catch {
+        setToast({
+          title: 'Notification setting could not be changed',
+          detail: 'Restart Pulse and try again.',
+          tone: 'info',
+        })
+      }
+      return
+    }
     if (enabled && !desktop) {
       if (!('Notification' in window)) {
         setToast({
@@ -722,8 +826,13 @@ function Workspace() {
       </div>
       {toast.sessionId && (
         <IconButton
-          label={live ? 'View session' : 'View completed session'}
+          label={live ? 'Open reply in VS Code' : 'View completed session'}
           onClick={() => {
+            if (live) {
+              void openVSCode(toast.sessionId!)
+              setToast(null)
+              return
+            }
             if (miniMode) openWorkspace(toast.sessionId)
             setSelectedId(toast.sessionId!)
             setView('sessions')
@@ -758,19 +867,19 @@ function Workspace() {
           </span>
         </div>
         <nav className="rail-sessions" aria-label="Session shortcuts">
-          {sessions
+          {miniSessions
             .filter((item) => preferences.showCompleted || item.status !== 'completed')
             .map((item) => (
               <button
                 key={item.id}
                 className={`rail-session mini-${item.status}`}
-                title={`${item.project}: ${item.task}\n${statusLabels[item.status]}`}
+                title={`${item.task}\n${item.project} / ${statusLabels[item.status]}`}
                 aria-label={`Open ${item.project}: ${item.task}`}
-                onClick={() => openWorkspace(item.id)}
+                onClick={() => (live ? void openVSCode(item.id) : openWorkspace(item.id))}
               >
                 <ProviderIcon provider={item.provider} size={18} />
                 <span className={`rail-status rail-status-${item.status}`} />
-                <span className="rail-session-name">{item.project}</span>
+                <span className="rail-session-name">{item.task}</span>
               </button>
             ))}
         </nav>
@@ -862,6 +971,9 @@ function Workspace() {
           <strong>
             {running.length} {running.length === 1 ? 'session' : 'sessions'} in progress
           </strong>
+          {live && ready.length > 0 && (
+            <span className="mini-ready-count">{ready.length} ready</span>
+          )}
           <span className="mini-clock">
             {new Date(now).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
           </span>
@@ -872,28 +984,34 @@ function Workspace() {
               {feed.message}
             </p>
           )}
-          {sessions
+          {miniSessions
             .filter((session) => preferences.showCompleted || session.status !== 'completed')
             .map((session) => (
               <button
                 key={session.id}
                 className={`mini-session mini-${session.status}`}
-                onClick={() => openWorkspace(session.id)}
+                title={`${session.task}\n${session.project}`}
+                onClick={() => (live ? void openVSCode(session.id) : openWorkspace(session.id))}
               >
-                <span className="mini-provider">
-                  <ProviderIcon provider={session.provider} size={20} />
-                </span>
                 <span className="mini-session-content">
-                  <strong>{session.project}</strong>
-                  <span>{session.task}</span>
-                  <StatusBadge status={session.status} />
-                </span>
-                <span className="mini-session-end">
-                  <span title={live ? 'Time since last transcript activity' : 'Elapsed time'}>
-                    {live ? `Idle ${idleTime(session, now)}` : elapsed(session, now)}
+                  <strong className="mini-session-title">{session.task}</strong>
+                  <span className="mini-session-folder" title={session.project}>
+                    <ProviderIcon provider={session.provider} size={12} />
+                    <Folder size={11} />
+                    <span>{session.project}</span>
                   </span>
-                  <ArrowUpRight size={13} />
+                  <span className="mini-session-meta">
+                    <StatusBadge status={session.status} />
+                    <span
+                      className="mini-session-end"
+                      title={live ? 'Time since last transcript activity' : 'Elapsed time'}
+                    >
+                      {live ? `Idle ${idleTime(session, now)}` : elapsed(session, now)}
+                    </span>
+                  </span>
+                  {live && <span className="mini-progress">{session.events.at(-1)?.text}</span>}
                 </span>
+                <ArrowUpRight size={14} className="mini-session-open" />
               </button>
             ))}
         </div>
@@ -1034,10 +1152,14 @@ function Workspace() {
             <IconButton
               label="Notifications"
               className="notification-button"
-              onClick={() => setModal('notifications')}
+              onClick={() =>
+                live && alerts.items.length ? void desktop?.showAlerts() : setModal('notifications')
+              }
             >
               <Bell size={18} />
-              {attention.length > 0 && <span className="notification-dot" />}
+              {(live ? alerts.items.length : attention.length) > 0 && (
+                <span className="notification-dot" />
+              )}
             </IconButton>
             <IconButton
               label={
@@ -1148,7 +1270,7 @@ function Workspace() {
                 filter: 'attention' as const,
               },
               {
-                label: 'Completed',
+                label: 'Rely Ready',
                 value: completed.length,
                 Icon: CircleCheck,
                 tone: 'blue',
@@ -1199,7 +1321,7 @@ function Workspace() {
                       { id: 'all', label: 'All sessions', count: sessions.length },
                       { id: 'running', label: 'In progress', count: running.length },
                       { id: 'attention', label: 'Attention', count: attention.length },
-                      { id: 'completed', label: 'Completed', count: completed.length },
+                      { id: 'completed', label: 'Rely Ready', count: completed.length },
                     ] as const
                   ).map((tab) => (
                     <button
@@ -1230,6 +1352,25 @@ function Workspace() {
                     )}
                   </label>
                   <div className="toolbar-right">
+                    {live && (
+                      <label className="provider-select collection-select">
+                        <select
+                          value={collection}
+                          onChange={(event) => {
+                            setCollection(event.target.value as typeof collection)
+                            setFilter('all')
+                          }}
+                          aria-label="Session collection"
+                        >
+                          <option value="active">Not archived</option>
+                          <option value="archived">
+                            Archived ({sessions.filter((session) => session.archivedAt).length})
+                          </option>
+                          <option value="all">All sessions</option>
+                        </select>
+                        <ChevronDown size={12} />
+                      </label>
+                    )}
                     <label className="provider-select">
                       <select
                         value={provider}
@@ -1287,6 +1428,7 @@ function Workspace() {
                         setQuery('')
                         setFilter('all')
                         setProvider('all')
+                        setCollection('all')
                         setPreferences((current) => ({ ...current, showCompleted: true }))
                       }}
                     >
@@ -1333,6 +1475,15 @@ function Workspace() {
                   </div>
                   <h2>{selected.task}</h2>
                   <StatusBadge status={selected.status} />
+                  {selected.archivedAt && (
+                    <span
+                      className="archive-badge"
+                      title={new Date(selected.archivedAt).toLocaleString()}
+                    >
+                      <Archive size={12} />
+                      Archived
+                    </span>
+                  )}
                   {live && <p className="source-message">{selected.statusDetail}</p>}
                   <dl className="session-facts">
                     <div>
@@ -1436,6 +1587,16 @@ function Workspace() {
                     ))}
                   </ol>
                   <div className="inspector-footer">
+                    {live && (
+                      <button
+                        className="button button-secondary open-session-button"
+                        title="Only changes the Pulse collection; monitoring continues"
+                        onClick={() => void archiveSession(selected)}
+                      >
+                        {selected.archivedAt ? <ArchiveRestore size={15} /> : <Archive size={15} />}
+                        {selected.archivedAt ? 'Restore session' : 'Archive session'}
+                      </button>
+                    )}
                     <button
                       className="button button-secondary open-session-button"
                       onClick={() =>
@@ -1449,7 +1610,7 @@ function Workspace() {
                       }
                     >
                       <SquareTerminal size={15} />
-                      {live ? 'Open VS Code workspace' : 'Open session'}
+                      {live ? 'Open in VS Code' : 'Open session'}
                       <ArrowUpRight size={15} />
                     </button>
                     {!live && selected.status === 'running' && (
@@ -1595,11 +1756,11 @@ function Workspace() {
                     <CircleCheck size={18} />
                   </span>
                   <div>
-                    <strong>Completed sessions</strong>
+                    <strong>Rely Ready sessions</strong>
                     <span>Visible in the workspace</span>
                   </div>
                   <Toggle
-                    label="Show completed sessions"
+                    label="Show Rely Ready sessions"
                     checked={preferences.showCompleted}
                     onChange={(showCompleted) =>
                       setPreferences((current) => ({ ...current, showCompleted }))

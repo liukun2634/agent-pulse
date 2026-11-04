@@ -130,7 +130,12 @@ function applyChatEvent(chat, entry) {
       chat.requestCount = (chat.requestCount ?? 0) + entry.v.length
       chat.request = pickRequest(entry.v.at(-1))
     }
-  } else if (field === 'requests' && index === chat.requestCount - 1 && chat.request && entry.kind === 1) {
+  } else if (
+    field === 'requests' &&
+    index === chat.requestCount - 1 &&
+    chat.request &&
+    entry.kind === 1
+  ) {
     if (property === 'modelState') {
       if (entry.k.length === 3) chat.request.modelState = entry.v
       else if (['value', 'completedAt'].includes(entry.k[3]))
@@ -143,36 +148,74 @@ function toSession(state, now = Date.now(), chat = {}) {
   if (state.updatedAt === null) return null
   const request = chat.request
   const completedAt = request?.modelState?.completedAt
-  const savedComplete = [1, 2, 3].includes(request?.modelState?.value) && Number.isFinite(completedAt) && completedAt >= state.updatedAt
+  const savedComplete =
+    [1, 2, 3].includes(request?.modelState?.value) &&
+    Number.isFinite(completedAt) &&
+    completedAt >= state.updatedAt
   const newRequest = Number.isFinite(request?.timestamp) && request.timestamp > state.updatedAt
   const updatedAt = savedComplete ? completedAt : newRequest ? request.timestamp : state.updatedAt
-  const status = savedComplete ? request.modelState.value === 2 ? 'cancelled' : request.error || request.modelState.value === 3 ? 'failed' : 'completed'
-    : request?.modelState?.value === 4 && (newRequest || state.status !== 'completed') ? 'waiting'
-    : newRequest ? now - updatedAt > STALE_AFTER ? 'idle' : 'running'
-      : state.status === 'running' && now - updatedAt > STALE_AFTER ? 'idle' : state.status
+  const status = savedComplete
+    ? request.modelState.value === 2
+      ? 'cancelled'
+      : request.error || request.modelState.value === 3
+        ? 'failed'
+        : 'completed'
+    : request?.modelState?.value === 4 && (newRequest || state.status !== 'completed')
+      ? 'waiting'
+      : newRequest
+        ? now - updatedAt > STALE_AFTER
+          ? 'idle'
+          : 'running'
+        : state.status === 'running' && now - updatedAt > STALE_AFTER
+          ? 'idle'
+          : state.status
   return {
     id: state.id,
     project: state.project,
-    task: typeof chat.title === 'string' && chat.title.trim() ? chat.title.replace(/\s+/g, ' ').trim().slice(0, 180) : state.task,
+    task:
+      typeof chat.title === 'string' && chat.title.trim()
+        ? chat.title.replace(/\s+/g, ' ').trim().slice(0, 180)
+        : state.task,
     branch: 'Not reported',
     provider: 'copilot',
     source: 'vscode',
     requestId: request?.requestId,
     status,
     statusDetail: savedComplete
-      ? status === 'cancelled' ? 'This request was stopped in VS Code.' : status === 'failed' ? 'VS Code saved this request with an error.' : 'VS Code saved this request as finished. You can open the conversation and continue.'
+      ? status === 'cancelled'
+        ? 'This request was stopped in VS Code.'
+        : status === 'failed'
+          ? 'VS Code saved this request with an error.'
+          : 'VS Code saved this request as finished. You can open the conversation and continue.'
       : status === 'idle'
-      ? 'No recent activity. No completion signal was recorded; the agent may still be working.'
-      : status === 'completed'
-        ? 'Assistant reply ended. This does not confirm the task succeeded.'
-        : status === 'waiting'
-          ? 'A question tool is pending in VS Code.'
-          : 'Inferred from local Copilot transcript events; permission prompts may not be reported.',
+        ? 'No recent activity. No completion signal was recorded; the agent may still be working.'
+        : status === 'completed'
+          ? 'Assistant reply ended. This does not confirm the task succeeded.'
+          : status === 'waiting'
+            ? 'VS Code is waiting for confirmation or input.'
+            : status === 'unknown'
+              ? 'No readable lifecycle state yet. Session history may still be loading.'
+              : 'Inferred from local Copilot transcript events; permission prompts may not be reported.',
     startedAt: state.startedAt,
     updatedAt,
     finishedAt: savedComplete ? completedAt : newRequest ? null : state.finishedAt,
     files: 0,
-    events: state.events,
+    events: savedComplete
+      ? [
+          ...state.events,
+          {
+            id: `saved-${request.requestId ?? state.id}-${completedAt}`,
+            text:
+              status === 'completed'
+                ? 'Reply ready in VS Code'
+                : status === 'cancelled'
+                  ? 'Request stopped in VS Code'
+                  : 'Request failed in VS Code',
+            at: completedAt,
+            kind: status === 'completed' ? 'success' : status === 'cancelled' ? 'warning' : 'error',
+          },
+        ].slice(-40)
+      : state.events,
   }
 }
 
@@ -183,8 +226,12 @@ function pollInterval(updatedAt, now = Date.now()) {
 
 async function readChatState(filename, cursor) {
   const stat = await fs.stat(filename)
-  if (!cursor || stat.size < cursor.offset || stat.ino !== cursor.ino ||
-    (stat.size === cursor.offset && stat.mtimeMs !== cursor.mtimeMs))
+  if (
+    !cursor ||
+    stat.size < cursor.offset ||
+    stat.ino !== cursor.ino ||
+    (stat.size === cursor.offset && stat.mtimeMs !== cursor.mtimeMs)
+  )
     cursor = { offset: 0, remainder: Buffer.alloc(0), ino: stat.ino, state: {} }
   const length = Math.min(stat.size - cursor.offset, 8 * 1024 * 1024)
   if (length > 0) {
@@ -195,12 +242,16 @@ async function readChatState(filename, cursor) {
       cursor.offset += bytesRead
       const chunk = Buffer.concat([cursor.remainder, buffer.subarray(0, bytesRead)])
       const boundary = chunk.lastIndexOf(10)
-      if (boundary >= 0) for (const line of chunk.subarray(0, boundary).toString('utf8').split('\n')) {
-        if (line.trim()) applyChatEvent(cursor.state, JSON.parse(line))
-      }
+      if (boundary >= 0)
+        for (const line of chunk.subarray(0, boundary).toString('utf8').split('\n')) {
+          if (line.trim()) applyChatEvent(cursor.state, JSON.parse(line))
+        }
       cursor.remainder = Buffer.from(chunk.subarray(boundary + 1))
-      if (cursor.remainder.length > 8 * 1024 * 1024) throw new Error('Chat record exceeds read limit.')
-    } finally { await handle.close() }
+      if (cursor.remainder.length > 32 * 1024 * 1024)
+        throw new Error('Chat record exceeds read limit.')
+    } finally {
+      await handle.close()
+    }
   }
   cursor.mtimeMs = stat.mtimeMs
   cursor.complete = cursor.offset === stat.size && cursor.remainder.length === 0
@@ -227,7 +278,8 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
         else
           for (const [filename, cached] of cache) {
             if (path.dirname(filename) === transcriptRoot) dirtyFiles.add(filename)
-            if (cached.titleFile && path.dirname(cached.titleFile) === transcriptRoot) dirtyFiles.add(cached.titleFile)
+            if (cached.titleFile && path.dirname(cached.titleFile) === transcriptRoot)
+              dirtyFiles.add(cached.titleFile)
           }
       })
       watcher.on('error', () => {
@@ -304,7 +356,9 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
         watchers.delete(root)
       }
     }
-    const present = new Set(candidates.flatMap((candidate) => [candidate.filename, candidate.titleFile]))
+    const present = new Set(
+      candidates.flatMap((candidate) => [candidate.filename, candidate.titleFile]),
+    )
     for (const filename of dirtyFiles) if (!present.has(filename)) dirtyFiles.delete(filename)
 
     candidates.sort((first, second) => second.stat.mtimeMs - first.stat.mtimeMs)
@@ -380,25 +434,37 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
           cached.stat = candidate.stat
           cached.nextCheckAt =
             now +
-            (cached.offset < candidate.stat.size || cached.remainder.length || cached.chat?.complete === false
+            (cached.offset < candidate.stat.size ||
+            cached.remainder.length ||
+            cached.chat?.complete === false
               ? 2000
               : pollInterval(
-                  Math.max(cached.state.updatedAt ?? now, cached.observedChangeAt ?? 0, cached.chat?.state.request?.timestamp ?? 0),
+                  Math.max(
+                    cached.state.updatedAt ?? now,
+                    cached.observedChangeAt ?? 0,
+                    cached.chat?.state.request?.timestamp ?? 0,
+                  ),
                   now,
                 ))
         }
         const session = toSession(cached.state, now, cached.chat?.complete ? cached.chat.state : {})
         if (!session) continue
-        if (cached.offset < candidate.stat.size || cached.remainder.length || cached.chat?.complete === false) {
+        if (
+          cached.offset < candidate.stat.size ||
+          cached.remainder.length ||
+          cached.chat?.complete === false
+        ) {
           session.status = 'unknown'
           session.finishedAt = null
-          session.statusDetail = 'Transcript update is incomplete; waiting for the next read.'
+          session.statusDetail = 'Session history is still being read; the next update will continue.'
         }
         sessions.push(session)
-        targets.set(
-          session.id,
-          `${scheme === 'vscode-insiders' ? scheme : 'vscode'}://file${pathToFileURL(candidate.workspacePath).pathname}`,
-        )
+        targets.set(session.id, {
+          uri: `${scheme === 'vscode-insiders' ? scheme : 'vscode'}://file${pathToFileURL(candidate.workspacePath).pathname}`,
+          workspacePath: candidate.workspacePath,
+          scheme: scheme === 'vscode-insiders' ? scheme : 'vscode',
+          sessionId: path.basename(candidate.filename, '.jsonl'),
+        })
       } catch {
         failures++
         cache.delete(candidate.filename)
@@ -418,7 +484,19 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
     }
   }
 
-  return { scan, close, workspaceUri: (id) => targets.get(id) }
+  return {
+    scan,
+    close,
+    workspaceUri: (id) => targets.get(id)?.uri,
+    sessionTarget: (id) => targets.get(id),
+  }
 }
 
-module.exports = { createTranscript, applyEvent, applyChatEvent, toSession, createVSCodeSource, pollInterval }
+module.exports = {
+  createTranscript,
+  applyEvent,
+  applyChatEvent,
+  toSession,
+  createVSCodeSource,
+  pollInterval,
+}

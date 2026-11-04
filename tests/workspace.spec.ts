@@ -47,7 +47,7 @@ test('approval resumes a sample session, then completes and notifies', async ({ 
   await page.getByRole('button', { name: 'Approve in demo' }).click()
   await expect(page.locator('.inspector > .status-badge')).toHaveText('In progress')
   await page.clock.fastForward(4600)
-  await expect(page.locator('.inspector > .status-badge')).toHaveText('Completed')
+  await expect(page.locator('.inspector > .status-badge')).toHaveText('Rely Ready')
   await expect(page.getByRole('status')).toContainText('Session complete')
   await expect(page.locator('.session-completed')).toHaveCount(3)
   await page.reload()
@@ -75,7 +75,7 @@ test('storage failure keeps the workspace interactive and reports persistence lo
 test('preferences persist and dialog supports keyboard dismissal', async ({ page }) => {
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
-  await page.getByRole('switch', { name: 'Show completed sessions' }).click()
+  await page.getByRole('switch', { name: 'Show Rely Ready sessions' }).click()
   await page.getByRole('switch', { name: 'Completion sound' }).click()
   await expect(page.getByRole('switch', { name: 'Always on top' })).toBeDisabled()
   await page.keyboard.press('Escape')
@@ -85,7 +85,7 @@ test('preferences persist and dialog supports keyboard dismissal', async ({ page
   await expect(page.locator('.session-card')).toHaveCount(4)
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await expect(page.getByRole('switch', { name: 'Completion sound' })).toBeChecked()
-  await expect(page.getByRole('switch', { name: 'Show completed sessions' })).not.toBeChecked()
+  await expect(page.getByRole('switch', { name: 'Show Rely Ready sessions' })).not.toBeChecked()
 })
 
 test('mini monitor synchronizes and returns to a selected session', async ({ page }) => {

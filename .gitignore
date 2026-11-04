@@ -15,6 +15,9 @@ dist-ssr
 test-results/
 playwright-report/
 
+# Customize
+DEVELOPMENT_PLAN.md
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
