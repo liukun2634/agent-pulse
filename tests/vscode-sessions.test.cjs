@@ -279,9 +279,12 @@ test('polling backs off with inactivity and clamps future timestamps', () => {
   assert.equal(pollInterval(now, now + 120000), 15000)
   assert.equal(pollInterval(now, now + 600000), 60000)
   assert.equal(pollInterval(now + 1000, now), 2000)
+  for (const status of ['running', 'waiting', 'idle'])
+    assert.equal(pollInterval(now, now + 3600000, status), 2000)
+  assert.equal(pollInterval(now, now + 600000, 'completed'), 60000)
 })
 
-test('idle reads back off, file changes wake them, and refresh bypasses the delay', async () => {
+test('finished sessions back off while unfinished requests stay on two-second polling', async () => {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'pulse-idle-'))
   let wake
   let closed = false
@@ -307,10 +310,10 @@ test('idle reads back off, file changes wake them, and refresh bypasses the dela
     const filename = path.join(transcripts, 'session-one.jsonl')
     const event = (type, at) =>
       JSON.stringify({ type, data: {}, timestamp: new Date(at).toISOString() }) + '\n'
-    await fs.writeFile(filename, event('assistant.turn_start', now - 900000))
-    assert.equal((await source.scan(now)).sessions[0].status, 'idle')
+    await fs.writeFile(filename, event('session.error', now - 900000))
+    assert.equal((await source.scan(now)).sessions[0].status, 'failed')
     await fs.appendFile(filename, event('assistant.turn_start', now + 1000))
-    assert.equal((await source.scan(now + 1000)).sessions[0].status, 'idle')
+    assert.equal((await source.scan(now + 1000)).sessions[0].status, 'failed')
     wake('change', 'session-one.jsonl')
     assert.equal((await source.scan(now + 1000)).sessions[0].status, 'running')
     await fs.appendFile(filename, event('session.error', now + 2000))
@@ -320,8 +323,12 @@ test('idle reads back off, file changes wake them, and refresh bypasses the dela
     assert.equal((await source.scan(now + 3100, { force: true })).sessions[0].status, 'running')
     await source.scan(now + 900000)
     await fs.appendFile(filename, event('session.error', now + 900001))
-    assert.equal((await source.scan(now + 959999)).sessions[0].status, 'idle')
-    assert.equal((await source.scan(now + 960000)).sessions[0].status, 'failed')
+    assert.equal((await source.scan(now + 901999)).sessions[0].status, 'idle')
+    assert.equal((await source.scan(now + 902000)).sessions[0].status, 'failed')
+    await source.scan(now + 1800000)
+    await fs.appendFile(filename, event('assistant.turn_start', now + 1800001))
+    assert.equal((await source.scan(now + 1859999)).sessions[0].status, 'failed')
+    assert.equal((await source.scan(now + 1860000)).sessions[0].status, 'running')
   } finally {
     source.close()
     assert.equal(closed, true)

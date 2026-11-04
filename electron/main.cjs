@@ -20,7 +20,10 @@ const fs = require('node:fs')
 
 const root = path.join(__dirname, '..')
 const entry = path.join(root, 'dist', 'index.html')
-const iconPath = path.join(root, 'public', 'pulse.png')
+const iconRoot = app.isPackaged
+  ? path.join(process.resourcesPath, 'icons')
+  : path.join(root, 'public')
+const iconPath = path.join(iconRoot, process.platform === 'win32' ? 'pulse.ico' : 'pulse.png')
 const testMode = process.env.PULSE_TEST_MODE === '1'
 const devUrl = process.env.PULSE_DEV_SERVER_URL
 const windows = new Set()
@@ -226,6 +229,12 @@ function isAppUrl(url) {
 
 function secureWindow(window) {
   windows.add(window)
+  if (process.platform === 'win32')
+    window.setAppDetails({
+      appId: 'dev.pulse.agent-monitor',
+      appIconPath: iconPath,
+      appIconIndex: 0,
+    })
   window.on('closed', () => windows.delete(window))
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event, url) => {
@@ -257,6 +266,7 @@ function createMain() {
     title: 'Pulse',
     icon: iconPath,
     show: false,
+    skipTaskbar: false,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -270,7 +280,10 @@ function createMain() {
     if (windowMode === 'workspace') mainWindow.show()
   })
   mainWindow.on('minimize', () => {
-    if (!quitting) showMini()
+    if (!quitting && windowMode !== 'mini') showMini()
+  })
+  mainWindow.on('restore', () => {
+    if (!quitting && windowMode === 'mini') showMini()
   })
   mainWindow.on('close', (event) => {
     if (!quitting && tray) {
@@ -296,6 +309,11 @@ function showMain(sessionId, maximize = false) {
       )
     } else mainWindow.webContents.send('pulse:select-session', sessionId)
   }
+}
+
+function restoreWindow() {
+  if (windowMode === 'mini') showMini()
+  else showMain()
 }
 
 function showAlertInbox() {
@@ -341,7 +359,10 @@ function showMini() {
       : screen.getPrimaryDisplay().workArea
   const reveal = () => {
     if (windowMode !== 'mini') return
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMinimized()) {
+      if (!mainWindow.isVisible()) mainWindow.showInactive()
+      mainWindow.minimize()
+    }
     if (miniWindow.isMinimized()) miniWindow.restore()
     alignMini(area, area.y + 16)
     miniWindow.show()
@@ -605,12 +626,13 @@ ipcMain.handle('pulse:notify', (event, payload) => {
 })
 
 function createTray() {
-  const icon = nativeImage.createFromPath(iconPath)
-  if (icon.isEmpty()) return
-  tray = new Tray(icon.resize({ width: 20, height: 20 }))
+  if (!fs.existsSync(iconPath)) return
+  tray = new Tray(iconPath)
   tray.setToolTip('Pulse - Agent sessions')
   tray.setContextMenu(
     Menu.buildFromTemplate([
+      { label: 'Show Pulse', click: () => restoreWindow() },
+      { type: 'separator' },
       { label: 'Open workspace', click: () => showMain() },
       { label: 'Pending reminders', click: () => showAlertInbox() },
       { label: 'Mini monitor', click: () => showMini() },
@@ -618,12 +640,13 @@ function createTray() {
       { label: 'Quit Pulse', click: () => app.quit() },
     ]),
   )
-  tray.on('double-click', () => showMain())
+  tray.on('click', () => restoreWindow())
+  tray.on('double-click', () => restoreWindow())
 }
 
 if (!testMode && !app.requestSingleInstanceLock()) app.quit()
 else {
-  app.on('second-instance', () => showMain())
+  app.on('second-instance', () => restoreWindow())
   app.whenReady().then(() => {
     alertHistory = createAlertHistory(
       path.join(app.getPath('userData'), 'reminder-history.json'),
@@ -662,7 +685,7 @@ else {
     void refreshFeed()
     feedTimer = setInterval(() => void refreshFeed(), 2000)
   })
-  app.on('activate', () => showMain())
+  app.on('activate', () => restoreWindow())
   app.on('before-quit', () => {
     persistAlertHistory()
     quitting = true

@@ -4,7 +4,7 @@
 
 A local desktop workspace for agent sessions: a pulse monitor for your AI agents, built with React, TypeScript and Electron.
 
-The desktop app includes an **experimental, read-only VS Code / GitHub Copilot adapter**. It reads local Copilot transcript events and saved chat request state with idle-aware polling and file-change wakeups. The browser preview and the separate Demo source still use sample data. Claude Code and Codex are not connected yet.
+The desktop app includes an **experimental, read-only VS Code / GitHub Copilot adapter**. It reads local Copilot transcript events and saved chat request state, checking active requests every two seconds with file-change wakeups and backoff for inactive history. The browser preview and the separate Demo source still use sample data. Claude Code and Codex are not connected yet.
 
 ## Run
 
@@ -27,13 +27,53 @@ This builds the interface and starts the desktop application. For desktop develo
 npm run desktop:dev
 ```
 
+## Windows installer
+
+Build the x64 installer with:
+
+```sh
+npm run dist:win
+```
+
+The output is `release/Agent-Pulse-Setup-<version>-x64.exe`. It installs for the current user without requiring administrator elevation, offers an installation-directory choice, and creates desktop and Start menu shortcuts. The application executable, native windows and shortcuts use the Pulse icon. Uninstall keeps local app data by default.
+
+This development installer is unsigned, so Windows may display an unknown-publisher or SmartScreen warning. Code signing remains future work; do not disable Windows security protections to install an untrusted build. Only Windows x64 is packaged by this command.
+
+Quit the running development copy from the tray before starting the installed app; otherwise the single-instance lock can reactivate the old `electron.exe` process. If Windows has an old Electron shortcut pinned, unpin that shortcut and pin the installed Agent Pulse app instead. The development command still runs Electron's generic executable, even though its window icon is configured.
+
+The installer includes `resources/companion/pulse-companion.vsix` under the chosen installation directory. Install this file explicitly through VS Code's **Extensions: Install from VSIX** command for exact chat navigation; the desktop installer does not silently install or reload editor extensions. Existing Companion users do not need to reinstall it just for this desktop packaging change.
+
+Generated release files are excluded from Git. The packaged app includes the compiled UI, Electron code, the bridge client and icon resources, not the development source, tests, local plan or build dependencies. The installer and packaged EXE were built and smoke-tested; the install/uninstall wizard was not executed on the development machine.
+
+## Project website and releases
+
+GitHub Pages hosts a short project introduction and a Windows download page. Binaries live in [GitHub Releases](https://github.com/liukun2634/agent-pulse/releases), not in Git or Pages. The download page looks up published releases, including previews; before the first release, or if the API is unavailable, it leaves download buttons disabled and provides a Releases link. Screenshots use only Demo data.
+
+Build the static site locally:
+
+```sh
+npm run build:site
+npm run test:site
+```
+
+The generated site is in `.artifacts/site/`; open its `index.html` in a browser. Source pages are in [site/](site/), with icons and local fonts added during the build. No application server is required.
+
+To enable GitHub publishing:
+
+1. In repository **Settings > Pages**, set **Source** to **GitHub Actions**. The repository and plan must support Pages; this site uses public, unauthenticated Releases downloads.
+2. Push the workflow and site changes to `main`. **Deploy project website** builds only the site and publishes it at [liukun2634.github.io/agent-pulse](https://liukun2634.github.io/agent-pulse/). Later site changes deploy automatically; the workflow also supports manual dispatch.
+3. When a version is ready, update the root package version and lockfile, commit and push those changes, then push a matching tag such as `v0.1.0`. **Build Windows release** rejects mismatched tags, runs tests, and builds the unsigned x64 installer on Windows. It publishes the EXE, Companion VSIX and `SHA256SUMS.txt` as release assets. All `0.x` and hyphenated prerelease versions are marked as previews. Pushing `main` alone never publishes an installer.
+4. To try packaging without publishing, run **Build Windows release > Run workflow**. Download its `windows-release` artifact from the Actions run; these build artifacts expire after 14 days. The website lists Releases, not temporary Actions artifacts.
+
+The **CI** workflow checks unit tests, lint, the application build and site browser tests on pull requests and `main`. Workflows use the built-in `GITHUB_TOKEN` with job-scoped permissions; no personal access token or signing secret is needed for the current unsigned build. Repository or organization policies may require allowing Actions and release writes. This configuration does not itself enable Pages or publish a release until the corresponding workflow runs. The application does not auto-update.
+
 ## VS Code source
 
 The desktop app starts with VS Code selected. It discovers local workspace folders and saved `.code-workspace` workspaces under VS Code's user storage. On Windows the default is `%APPDATA%\Code\User\workspaceStorage`. Open the app alongside VS Code and look for your project, then use Mini monitor to keep it at the screen edge. Settings enables optional system notifications for input requests, finished replies and session errors.
 
 The adapter reads `GitHub.copilot-chat/transcripts/*.jsonl` incrementally. It shows up to 100 recent transcript-backed sessions, with the latest 40 timeline events per session. Session IDs include the workspace identity. Matching `chatSessions/*.jsonl` records are also read incrementally for saved titles and the latest request state. A saved `customTitle`, when available, supplies the display title; otherwise a transcript user message or a generic label is used. Saved title changes are reflected on subsequent reads. Request state can supply completion, cancellation, error and input signals that are missing from the transcript.
 
-Lightweight directory discovery and snapshot publication run every two seconds so newly created or removed sessions remain visible. For known sessions, file checks and reads back off with idle time: 2 seconds below 30 seconds idle, 5 seconds below 2 minutes, 15 seconds below 10 minutes, then 60 seconds. Changes in transcript or saved-chat directories wake the affected session on the next discovery tick. New transcript activity or a newer saved request restores fast checks. If filesystem notifications are unavailable or missed, the bounded polling interval remains the fallback. Manual Refresh and switching to VS Code bypass the idle delay. Partial writes and unread backlog stay on fast polling.
+Lightweight directory discovery and snapshot publication run every two seconds so newly created or removed sessions remain visible. **In progress, Needs input and unfinished No recent activity sessions keep a two-second check interval**, even after a long silence. Other sessions, including finished history, back off with inactivity: 2 seconds below 30 seconds idle, 5 seconds below 2 minutes, 15 seconds below 10 minutes, then 60 seconds. Changes in transcript or saved-chat directories wake the affected session on the next discovery tick. New transcript activity or a newer saved request restores fast checks. If filesystem notifications are unavailable or missed, bounded polling remains the fallback. Manual Refresh and switching to VS Code bypass the idle delay. Partial writes and unread backlog stay on fast polling. These are scheduling intervals, not a real-time guarantee; disk I/O and initial history loading can add latency.
 
 Cards, the side monitor and session details display **Idle**, the time since the last observed transcript activity, updated every second without rereading the log. It continues to grow after a reply finishes and resets when a newer event arrives. This is not a claim that the agent is doing no work. **Elapsed** remains separately available in the details and freezes when the observed reply ends.
 
@@ -91,7 +131,7 @@ Live snapshots stay in process memory and are not written to the demo cache. Rem
 - Inspect the session timeline, task details, elapsed time and live idle duration.
 - In Demo only, run a completion demo, approve a sample request, or retry a sample failure. These controls cannot mutate real sessions.
 - Receive in-app completion alerts; optionally enable system notifications and sound in Settings.
-- Minimize the native workspace, or click Mini monitor, to switch to a side monitor on the current display. The main window hides instead of competing for desktop space.
+- Minimize the native workspace, or click Mini monitor, to switch to a side monitor on the current display. The main window stays minimized with a taskbar entry; restoring it from the taskbar hides the mini monitor. Closing the workspace still hides it to the tray instead.
 - Collapse the side monitor into a narrow task rail; switch between the left and right screen edges.
 - Click a live task in either side-monitor layout to open it in VS Code. Demo tasks still restore their Pulse detail panel.
 - Use Expand workspace to maximize the full panel; minimizing it returns to the side monitor.

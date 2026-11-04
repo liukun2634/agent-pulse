@@ -219,7 +219,8 @@ function toSession(state, now = Date.now(), chat = {}) {
   }
 }
 
-function pollInterval(updatedAt, now = Date.now()) {
+function pollInterval(updatedAt, now = Date.now(), status) {
+  if (['running', 'waiting', 'idle'].includes(status)) return 2000
   const idle = Math.max(0, now - updatedAt)
   return idle < 30000 ? 2000 : idle < 120000 ? 5000 : idle < 600000 ? 15000 : 60000
 }
@@ -430,6 +431,7 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
           }
           cached.mtimeMs = candidate.stat.mtimeMs
         }
+        const session = toSession(cached.state, now, cached.chat?.complete ? cached.chat.state : {})
         if (candidate.check) {
           cached.stat = candidate.stat
           cached.nextCheckAt =
@@ -445,9 +447,9 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
                     cached.chat?.state.request?.timestamp ?? 0,
                   ),
                   now,
+                  session?.status,
                 ))
         }
-        const session = toSession(cached.state, now, cached.chat?.complete ? cached.chat.state : {})
         if (!session) continue
         if (
           cached.offset < candidate.stat.size ||

@@ -2,7 +2,7 @@ import { defineConfig } from '@playwright/test'
 
 export default defineConfig({
   testDir: './tests',
-  testMatch: 'workspace.spec.ts',
+  testMatch: ['workspace.spec.ts', 'site.spec.ts'],
   fullyParallel: true,
   workers: 2,
   timeout: 25000,
@@ -16,7 +16,7 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: 'npm run dev -- --host 127.0.0.1 --port 5182 --strictPort',
+    command: 'npm run build:site && npm run dev -- --host 127.0.0.1 --port 5182 --strictPort',
     url: 'http://127.0.0.1:5182',
     reuseExistingServer: false,
     timeout: 30000,

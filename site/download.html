@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Download Agent Pulse for Windows and the VS Code Companion. Find release details, installation steps and development preview notes."
+    />
+    <title>Download · Agent Pulse</title>
+    <link rel="icon" href="assets/pulse.png" />
+    <link rel="stylesheet" href="styles.css" />
+    <script defer src="releases.js"></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="container header-inner">
+        <a class="brand" href="index.html"
+          ><img src="assets/pulse.png" width="30" height="30" alt="" />Agent Pulse</a
+        >
+        <nav aria-label="Main navigation">
+          <a href="index.html">Project</a><a href="download.html" aria-current="page">Download</a
+          ><a
+            href="https://github.com/liukun2634/agent-pulse"
+            aria-label="GitHub repository"
+            title="GitHub repository"
+            >{{icon:github}}<span>GitHub</span></a
+          >
+        </nav>
+      </div>
+    </header>
+    <main class="container download-main">
+      <p class="eyebrow">
+        <span class="status-dot"></span>WINDOWS x64
+        <span class="preview-label">Development preview</span>
+      </p>
+      <h1>Download Agent Pulse</h1>
+      <p class="lead">
+        Desktop monitoring and session reminders. No separate Node.js installation required.
+      </p>
+      <section class="download-section" aria-labelledby="desktop-title">
+        <div class="download-heading">
+          <h2 id="desktop-title">{{icon:monitor}}Desktop installer</h2>
+          <span class="unsigned-label">Unsigned preview</span>
+        </div>
+        <p data-release-status role="status" aria-live="polite">Checking available releases...</p>
+        <div class="actions">
+          <a class="button primary" data-asset="installer" aria-disabled="true" tabindex="-1"
+            >{{icon:download}}Download Windows EXE</a
+          ><a
+            class="text-link"
+            data-release-notes
+            href="https://github.com/liukun2634/agent-pulse/releases"
+            >GitHub Releases {{icon:arrow}}</a
+          >
+        </div>
+        <dl class="release-details">
+          <div>
+            <dt>Version</dt>
+            <dd data-release-name>Not loaded yet</dd>
+          </div>
+          <div>
+            <dt>Published</dt>
+            <dd data-release-date>-</dd>
+          </div>
+          <div>
+            <dt>Installer</dt>
+            <dd data-release-size>Windows x64</dd>
+          </div>
+        </dl>
+        <p class="fine-print">
+          Downloads are hosted on GitHub Releases. This page does not collect credentials or session
+          data.
+        </p>
+        <noscript
+          ><p>
+            Release lookup requires JavaScript. Visit GitHub Releases above to browse published
+            downloads.
+          </p></noscript
+        >
+      </section>
+      <section class="download-section" aria-labelledby="companion-title">
+        <div class="download-heading">
+          <h2 id="companion-title">{{icon:code}}Pulse Companion</h2>
+          <span class="section-note">VS Code extension</span>
+        </div>
+        <p>
+          Open the right conversation in an existing workspace. The desktop installer also includes
+          this VSIX; it does not automatically install or reload editor extensions.
+        </p>
+        <div class="actions">
+          <a class="button secondary" data-asset="companion" aria-disabled="true" tabindex="-1"
+            >{{icon:download}}Download Companion VSIX</a
+          ><a class="text-link" data-asset="checksums" aria-disabled="true" tabindex="-1"
+            >SHA-256 checksums {{icon:file}}</a
+          >
+        </div>
+      </section>
+      <section class="install-section" aria-labelledby="install-title">
+        <h2 id="install-title">Install and get started</h2>
+        <ol class="install-steps">
+          <li>
+            <strong>Quit any running copy</strong>
+            <p>
+              Choose Quit Pulse from the tray so the single-instance lock does not reactivate an
+              older build.
+            </p>
+          </li>
+          <li>
+            <strong>Run the EXE to install for your user account</strong>
+            <p>
+              Choose an installation directory. Unsigned builds may trigger a Windows publisher
+              warning. Verify the source and checksums; do not disable system security protections.
+            </p>
+          </li>
+          <li>
+            <strong>Install Companion and open your project</strong>
+            <p>
+              In VS Code, run Extensions: Install from VSIX and select the downloaded extension.
+              After updating an active extension, run Developer: Reload Window.
+            </p>
+          </li>
+          <li>
+            <strong>Start Pulse and select the VS Code source</strong>
+            <p>
+              Open the mini monitor to follow progress. Loading history may take a moment. Demo
+              sessions are sample data, not evidence that a live agent is connected.
+            </p>
+          </li>
+        </ol>
+      </section>
+      <section class="release-boundary">
+        <h2>Current support</h2>
+        <p>
+          Windows x64 and local VS Code / GitHub Copilot. Internal session formats and sidebar
+          commands may change between VS Code versions. Remote workspaces, other architectures,
+          Claude Code and Codex are not supported yet.
+        </p>
+        <a class="text-link" href="https://github.com/liukun2634/agent-pulse/issues"
+          >Report an installation or connection issue {{icon:arrow}}</a
+        >
+      </section>
+    </main>
+    <footer class="container site-footer">
+      <span>Agent Pulse · Development preview</span
+      ><a href="index.html">About the project {{icon:arrow}}</a>
+    </footer>
+  </body>
+</html>

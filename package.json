@@ -2,21 +2,80 @@
   "name": "pulse-agent-monitor",
   "private": true,
   "version": "0.1.0",
+  "description": "A local desktop monitor for agent sessions",
+  "author": "Agent Pulse",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:site": "node scripts/build-site.mjs",
     "lint": "oxlint",
     "preview": "vite preview",
-    "predesktop": "npm run build",
+    "icons": "node scripts/icons.mjs",
+    "predesktop": "npm run icons && npm run build",
     "desktop": "node scripts/desktop.mjs",
     "desktop:dev": "node scripts/desktop.mjs --dev",
+    "predesktop:dev": "npm run icons",
+    "dist:win": "npm run icons && npm run build && npm --prefix vscode-companion run package && electron-builder --win nsis --x64 --publish never",
     "test": "node --test src/sessions.test.ts tests/vscode-sessions.test.cjs tests/companion.test.cjs",
     "test:e2e": "playwright test",
+    "test:site": "playwright test site.spec.ts",
     "pretest:desktop": "npm run build",
     "test:desktop": "node --test tests/desktop.test.mjs",
     "format": "prettier --write src electron scripts tests *.json *.ts index.html README.md"
+  },
+  "build": {
+    "appId": "dev.pulse.agent-monitor",
+    "productName": "Agent Pulse",
+    "directories": {
+      "output": "release"
+    },
+    "asar": true,
+    "npmRebuild": false,
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "vscode-companion/bridge.cjs",
+      "package.json",
+      "!node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "public/pulse.ico",
+        "to": "icons/pulse.ico"
+      },
+      {
+        "from": "public/pulse.png",
+        "to": "icons/pulse.png"
+      },
+      {
+        "from": ".artifacts/pulse-companion.vsix",
+        "to": "companion/pulse-companion.vsix"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "public/pulse.ico",
+      "artifactName": "Agent-Pulse-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Agent Pulse"
+    }
   },
   "dependencies": {
     "@fontsource/dm-sans": "^5.3.0",
@@ -34,7 +93,10 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "electron": "^44.9.3",
+    "electron-builder": "^26.18.0",
     "oxlint": "^1.88.0",
+    "png-to-ico": "^3.0.2",
+    "pngjs": "^7.0.0",
     "prettier": "^3.9.10",
     "typescript": "~6.0.3",
     "vite": "^8.3.4"

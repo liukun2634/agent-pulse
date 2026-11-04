@@ -59,13 +59,30 @@ test('desktop pinning, mini monitor and session synchronization', { timeout: 900
       const area = screen.getDisplayMatching(bounds).workArea
       return {
         mainVisible: main.isVisible(),
+        mainMinimized: main.isMinimized(),
         width: bounds.width,
         rightGap: area.x + area.width - bounds.x - bounds.width,
       }
     })
     assert.equal(docked.mainVisible, false)
+    assert.equal(docked.mainMinimized, true)
     assert.ok(Math.abs(docked.width - 360) <= 5, `Unexpected sidebar width: ${docked.width}`)
     assert.ok(Math.abs(docked.rightGap - 12) <= 2, `Unexpected edge gap: ${docked.rightGap}`)
+    await application.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()
+        .find((window) => !window.webContents.getURL().includes('view=mini'))
+        .restore(),
+    )
+    await expect
+      .poll(() =>
+        application.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()
+            .find((window) => !window.webContents.getURL().includes('view=mini'))
+            .isMinimized(),
+        ),
+      )
+      .toBe(true)
+    await mini.waitForFunction(() => document.visibilityState === 'visible')
     assert.equal(
       await application.evaluate(({ BrowserWindow }) =>
         BrowserWindow.getAllWindows()
@@ -80,6 +97,25 @@ test('desktop pinning, mini monitor and session synchronization', { timeout: 900
     await mini.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
     await mini.locator('.mini-rail').waitFor()
     assert.equal(await mini.locator('.rail-session').count(), 6)
+    for (const event of ['activate', 'second-instance']) {
+      await application.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()
+          .find((window) => window.webContents.getURL().includes('view=mini'))
+          .hide(),
+      )
+      await mini.waitForFunction(() => document.visibilityState === 'hidden')
+      await application.evaluate(({ app }, name) => app.emit(name), event)
+      await mini.waitForFunction(() => document.visibilityState === 'visible')
+      await expect(mini.locator('.mini-rail')).toBeVisible()
+      assert.equal(
+        await application.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()
+            .find((window) => !window.webContents.getURL().includes('view=mini'))
+            .isMinimized(),
+        ),
+        true,
+      )
+    }
     const collapsedWidth = await application.evaluate(
       ({ BrowserWindow }) =>
         BrowserWindow.getAllWindows()
@@ -179,6 +215,14 @@ test('desktop pinning, mini monitor and session synchronization', { timeout: 900
       { mainVisible: true, miniVisible: false },
     )
 
+    await application.evaluate(({ app, BrowserWindow }) => {
+      BrowserWindow.getAllWindows()
+        .find((window) => !window.webContents.getURL().includes('view=mini'))
+        .hide()
+      app.emit('activate')
+    })
+    await main.waitForFunction(() => document.visibilityState === 'visible')
+    await expect(mini.locator('.mini-window')).not.toBeVisible()
     await main.screenshot({
       path: '.artifacts/desktop-native.png',
       animations: 'disabled',
