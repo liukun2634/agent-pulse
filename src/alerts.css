@@ -1,3 +1,4 @@
+html:has(.alert-window),
 body:has(.alert-window),
 body:has(.alert-window) #root {
   background: transparent;
@@ -12,15 +13,11 @@ body:has(.alert-window) #root {
   color: #283c32;
   font-family: 'DM Sans', sans-serif;
   opacity: 1;
-  transform: translateY(0);
-  transition:
-    opacity 280ms ease,
-    transform 280ms ease;
-  animation: alert-arrive 180ms ease-out;
+  transition: opacity 320ms ease;
+  animation: alert-arrive 160ms ease-out;
 }
 .alert-fading {
   opacity: 0;
-  transform: translateY(-8px);
 }
 .alert-header,
 .alert-header h1,
@@ -104,11 +101,9 @@ body:has(.alert-window) #root {
 @keyframes alert-arrive {
   from {
     opacity: 0;
-    transform: translateY(-8px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 @media (prefers-reduced-motion: reduce) {

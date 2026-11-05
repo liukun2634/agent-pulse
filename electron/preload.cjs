@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('pulse', {
     return () => ipcRenderer.removeListener('pulse:open-alert-inbox', handler)
   },
   hideAlertPopup: (sequence) => ipcRenderer.invoke('pulse:hide-alert-popup', sequence),
+  readyAlertPopup: (sequence) => ipcRenderer.invoke('pulse:ready-alert-popup', sequence),
   setSystemNotifications: (enabled) =>
     ipcRenderer.invoke('pulse:set-system-notifications', enabled),
   onAlerts: (listener) => {
@@ -24,6 +25,7 @@ contextBridge.exposeInMainWorld('pulse', {
   setSessionSource: (source) => ipcRenderer.invoke('pulse:set-session-source', source),
   refreshSessions: () => ipcRenderer.invoke('pulse:refresh-sessions'),
   openVSCode: (id, reference) => ipcRenderer.invoke('pulse:open-vscode', id, reference),
+  openSession: (id, reference) => ipcRenderer.invoke('pulse:open-session', id, reference),
   onSessionOpened: (listener) => {
     const handler = (_event, reference) => listener(reference)
     ipcRenderer.on('pulse:session-opened', handler)

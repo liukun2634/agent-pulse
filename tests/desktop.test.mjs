@@ -17,6 +17,196 @@ import { pathToFileURL } from 'node:url'
 import { expect } from '@playwright/test'
 import { _electron as electron } from 'playwright'
 
+test(
+  'Live combines Claude and VS Code while Demo stays independent',
+  { timeout: 60000 },
+  async () => {
+    const temporary = mkdtempSync(path.join(tmpdir(), 'pulse-claude-test-'))
+    const storage = path.join(temporary, 'storage')
+    const workspace = path.join(storage, 'workspace-one')
+    const transcripts = path.join(workspace, 'GitHub.copilot-chat', 'transcripts')
+    const fixture = path.join(temporary, 'claude.json')
+    const transcript = path.join(transcripts, 'copilot-one.jsonl')
+    mkdirSync(transcripts, { recursive: true })
+    writeFileSync(
+      path.join(workspace, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL(path.join(temporary, 'project-vscode')).href }),
+    )
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        type: 'user.message',
+        timestamp: new Date().toISOString(),
+        data: { content: 'Copilot sample' },
+      }) + '\n',
+    )
+    const rows = [
+      {
+        kind: 'interactive',
+        sessionId: 'claude-idle',
+        cwd: path.join(temporary, 'project-claude'),
+        name: 'Claude idle sample',
+        startedAt: Date.now() - 600000,
+        status: 'idle',
+      },
+      {
+        kind: 'interactive',
+        sessionId: 'claude-busy',
+        cwd: path.join(temporary, 'project-claude'),
+        name: 'Claude busy sample',
+        startedAt: Date.now() - 600000,
+        status: 'busy',
+      },
+    ]
+    writeFileSync(fixture, JSON.stringify(rows))
+    const environment = {
+      ...process.env,
+      PULSE_TEST_MODE: '1',
+      PULSE_TEST_DATA: path.join(temporary, 'data'),
+      PULSE_VSCODE_STORAGE: storage,
+      PULSE_TEST_CLAUDE: fixture,
+    }
+    delete environment.ELECTRON_RUN_AS_NODE
+    delete environment.PULSE_DEV_SERVER_URL
+    let application
+    try {
+      application = await electron.launch({ args: [process.cwd()], env: environment })
+      const main = await application.firstWindow()
+      const errors = []
+      main.on('pageerror', (error) => errors.push(error.message))
+      await expect(main.locator('.session-card')).toHaveCount(3)
+      await expect(main.getByRole('button', { name: 'Live', exact: true })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
+      await expect(main.locator('.source-switch button')).toHaveCount(2)
+      assert.equal(
+        await main.evaluate(async () => (await window.pulse.getSessionFeed()).source),
+        'live',
+      )
+      await main.getByRole('combobox', { name: 'Agent filter' }).selectOption('claude')
+      await expect(main.locator('.session-card')).toHaveCount(2)
+      await expect(main.locator('.session-idle .duration')).toHaveText('Idle')
+      await expect(main.locator('.session-running .duration')).toHaveText(/^\d+:\d{2}$/)
+      const duration = await main.locator('.session-running .duration').textContent()
+      await expect
+        .poll(() => main.locator('.session-running .duration').textContent())
+        .not.toBe(duration)
+      assert.equal(
+        await main.evaluate(
+          async () =>
+            (await window.pulse.getSessionFeed()).sessions.filter(
+              (item) => item.status === 'running',
+            ).length,
+        ),
+        2,
+      )
+      await main.getByRole('combobox', { name: 'Agent filter' }).selectOption('copilot')
+      await expect(main.locator('.session-card')).toHaveCount(1)
+      await main.getByRole('combobox', { name: 'Agent filter' }).selectOption('all')
+      await expect(main.locator('.session-card')).toHaveCount(3)
+      await main.locator('.session-card').filter({ hasText: 'Claude busy sample' }).click()
+      await expect(
+        main.getByRole('button', { name: 'Continue in terminal', exact: true }),
+      ).toBeDisabled()
+      mkdirSync('.artifacts', { recursive: true })
+      for (const width of [1440, 390]) {
+        await main.setViewportSize({ width, height: 980 })
+        assert.equal(
+          await main.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+          true,
+        )
+        assert.equal(
+          await main.evaluate(() => {
+            const heading = document.querySelector('.page-heading').getBoundingClientRect()
+            const actions = document.querySelector('.heading-actions').getBoundingClientRect()
+            return actions.left >= heading.left - 1 && actions.right <= heading.right + 1
+          }),
+          true,
+        )
+        await main.screenshot({
+          path: `.artifacts/combined-workspace-${width}.png`,
+          animations: 'disabled',
+        })
+      }
+      await main.setViewportSize({ width: 1440, height: 980 })
+      const opened = application.waitForEvent('window')
+      await main.getByRole('button', { name: 'Mini monitor', exact: true }).click()
+      const mini = await opened
+      await expect(mini.locator('.mini-session')).toHaveCount(3)
+      await expect(mini.locator('.mini-idle .mini-session-end')).toHaveText('Idle')
+      const claudeMini = mini.locator('.mini-session').filter({ hasText: 'Claude busy sample' })
+      await expect(claudeMini.locator('.mini-session-end')).not.toContainText('Idle')
+      await mini.screenshot({
+        path: '.artifacts/combined-mini.png',
+        animations: 'disabled',
+        scale: 'css',
+      })
+      await claudeMini.click()
+      await expect(main.locator('.inspector h2')).toHaveText('Claude busy sample')
+      await expect(
+        main.getByRole('button', { name: 'Continue in terminal', exact: true }),
+      ).toBeDisabled()
+      await main.getByRole('button', { name: 'Demo', exact: true }).click()
+      await expect(main.locator('.session-card')).toHaveCount(6)
+      rows[0].status = 'waiting'
+      writeFileSync(fixture, JSON.stringify(rows))
+      appendFileSync(
+        transcript,
+        JSON.stringify({
+          type: 'assistant.message',
+          timestamp: new Date().toISOString(),
+          data: { toolRequests: [{ toolCallId: 'question', name: 'vscode_askQuestions' }] },
+        }) + '\n',
+      )
+      await main.evaluate(() => window.pulse.refreshSessions())
+      await expect
+        .poll(() => main.evaluate(async () => (await window.pulse.getAlerts()).items.length))
+        .toBe(2)
+      assert.equal(
+        await main.evaluate(async () => (await window.pulse.getSessionFeed()).source),
+        'demo',
+      )
+      await expect(main.locator('.session-card')).toHaveCount(6)
+      const alerts = await main.evaluate(() => window.pulse.getAlerts())
+      assert.ok(alerts.items.some((item) => item.title === 'Input needed in Claude Code'))
+      assert.ok(alerts.items.some((item) => item.title === 'Input needed in VS Code'))
+      const claudeId = alerts.items.find((item) => item.sessionId.startsWith('claude:')).sessionId
+      const windowsBefore = application.windows().length
+      const result = await main.evaluate((id) => window.pulse.openSession(id), claudeId)
+      assert.equal(result.verified, false)
+      assert.equal(result.code, 'terminal-navigation-unavailable')
+      assert.equal(application.windows().length, windowsBefore)
+      assert.equal((await main.evaluate(() => window.pulse.getAlerts())).items.length, 2)
+      await main.getByRole('button', { name: 'Live', exact: true }).click()
+      await expect(main.locator('.session-card')).toHaveCount(3)
+      await expect(main.locator('.session-waiting')).toHaveCount(2)
+      assert.equal(
+        await main.evaluate(() =>
+          JSON.parse(localStorage.getItem('pulse.demo.sessions.v1')).sessions.some(
+            (item) => item.source,
+          ),
+        ),
+        false,
+      )
+      await main.evaluate((id) => window.pulse.setSessionArchived(id, true), claudeId)
+      await expect(main.locator('.session-card')).toHaveCount(2)
+      await main.getByRole('combobox', { name: 'Agent filter' }).selectOption('copilot')
+      await expect(main.locator('.session-card')).toHaveCount(1)
+      assert.equal((await main.evaluate(() => window.pulse.getAlerts())).items.length, 2)
+      writeFileSync(fixture, 'invalid')
+      await main.evaluate(() => window.pulse.refreshSessions())
+      await expect(main.locator('.source-summary')).toContainText('Claude Code: Could not query')
+      await expect(main.locator('.session-card')).toHaveCount(1)
+      await expect(main.locator('.session-card')).toContainText('Copilot sample')
+      assert.deepEqual(errors, [])
+    } finally {
+      await application?.close()
+      rmSync(temporary, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    }
+  },
+)
+
 test('desktop pinning, mini monitor and session synchronization', { timeout: 90000 }, async () => {
   const userData = mkdtempSync(path.join(tmpdir(), 'pulse-test-'))
   const environment = { ...process.env, PULSE_TEST_MODE: '1', PULSE_TEST_DATA: userData }
@@ -65,23 +255,27 @@ test('desktop pinning, mini monitor and session synchronization', { timeout: 900
       }
     })
     assert.equal(docked.mainVisible, false)
-    assert.equal(docked.mainMinimized, true)
+    assert.equal(docked.mainMinimized, false)
     assert.ok(Math.abs(docked.width - 360) <= 5, `Unexpected sidebar width: ${docked.width}`)
     assert.ok(Math.abs(docked.rightGap - 12) <= 2, `Unexpected edge gap: ${docked.rightGap}`)
-    await application.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows()
-        .find((window) => !window.webContents.getURL().includes('view=mini'))
-        .restore(),
-    )
-    await expect
-      .poll(() =>
-        application.evaluate(({ BrowserWindow }) =>
-          BrowserWindow.getAllWindows()
-            .find((window) => !window.webContents.getURL().includes('view=mini'))
-            .isMinimized(),
-        ),
+    await application.evaluate(async ({ BrowserWindow }) => {
+      const workspace = BrowserWindow.getAllWindows().find(
+        (window) => !window.webContents.getURL().includes('view=mini'),
       )
-      .toBe(true)
+      const compact = BrowserWindow.getAllWindows().find((window) =>
+        window.webContents.getURL().includes('view=mini'),
+      )
+      globalThis.mainReveals = 0
+      workspace.on('show', () => globalThis.mainReveals++)
+      await new Promise((resolve) => {
+        compact.once('minimize', resolve)
+        compact.minimize()
+      })
+      await new Promise((resolve) => {
+        compact.once('restore', resolve)
+        compact.restore()
+      })
+    })
     await mini.waitForFunction(() => document.visibilityState === 'visible')
     assert.equal(
       await application.evaluate(({ BrowserWindow }) =>
@@ -97,25 +291,57 @@ test('desktop pinning, mini monitor and session synchronization', { timeout: 900
     await mini.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
     await mini.locator('.mini-rail').waitFor()
     assert.equal(await mini.locator('.rail-session').count(), 6)
+    const savedPosition = await application.evaluate(({ BrowserWindow, screen }) => {
+      const compact = BrowserWindow.getAllWindows().find((window) =>
+        window.webContents.getURL().includes('view=mini'),
+      )
+      const area = screen.getDisplayMatching(compact.getBounds()).workArea
+      compact.setPosition(area.x + 120, area.y + 140, false)
+      return compact.getPosition()
+    })
     for (const event of ['activate', 'second-instance']) {
       await application.evaluate(({ BrowserWindow }) =>
         BrowserWindow.getAllWindows()
           .find((window) => window.webContents.getURL().includes('view=mini'))
           .hide(),
       )
-      await mini.waitForFunction(() => document.visibilityState === 'hidden')
+      await expect
+        .poll(() =>
+          application.evaluate(({ BrowserWindow }) =>
+            BrowserWindow.getAllWindows()
+              .find((window) => window.webContents.getURL().includes('view=mini'))
+              .isVisible(),
+          ),
+        )
+        .toBe(false)
       await application.evaluate(({ app }, name) => app.emit(name), event)
-      await mini.waitForFunction(() => document.visibilityState === 'visible')
+      await expect
+        .poll(() =>
+          application.evaluate(({ BrowserWindow }) =>
+            BrowserWindow.getAllWindows()
+              .find((window) => window.webContents.getURL().includes('view=mini'))
+              .isVisible(),
+          ),
+        )
+        .toBe(true)
       await expect(mini.locator('.mini-rail')).toBeVisible()
       assert.equal(
         await application.evaluate(({ BrowserWindow }) =>
           BrowserWindow.getAllWindows()
             .find((window) => !window.webContents.getURL().includes('view=mini'))
-            .isMinimized(),
+            .isVisible(),
         ),
-        true,
+        false,
       )
+      const restored = await application.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()
+          .find((window) => window.webContents.getURL().includes('view=mini'))
+          .getPosition(),
+      )
+      assert.ok(Math.abs(restored[0] - savedPosition[0]) <= 2)
+      assert.ok(Math.abs(restored[1] - savedPosition[1]) <= 2)
     }
+    assert.equal(await application.evaluate(() => globalThis.mainReveals), 0)
     const collapsedWidth = await application.evaluate(
       ({ BrowserWindow }) =>
         BrowserWindow.getAllWindows()
@@ -564,7 +790,7 @@ test(
       await main.clock.fastForward(65000)
       await expect(main.locator('.session-card .duration')).toHaveText('Idle 01:05')
       await expect(
-        main.locator('.session-facts > div').filter({ hasText: 'Idle' }).locator('dd'),
+        main.locator('.session-facts > div').filter({ hasText: 'Last activity' }).locator('dd'),
       ).toHaveText('01:05')
       await expect(
         main.locator('.session-facts > div').filter({ hasText: 'Elapsed' }).locator('dd'),
@@ -595,7 +821,7 @@ test(
       await main.getByRole('button', { name: 'Demo', exact: true }).click()
       await expect(main.locator('.session-card')).toHaveCount(6)
       await expect(mini.locator('.mini-session')).toHaveCount(6)
-      await main.getByRole('button', { name: 'VS Code', exact: true }).click()
+      await main.getByRole('button', { name: 'Live', exact: true }).click()
       await expect(main.locator('.session-card')).toHaveCount(1)
       await expect(mini.locator('.mini-session')).toHaveCount(1)
       assert.equal(
@@ -614,7 +840,8 @@ test(
       rmSync(filename)
       await main.getByRole('button', { name: 'Refresh', exact: true }).click()
       await expect(main.locator('.session-card')).toHaveCount(0)
-      await expect(main.locator('.source-summary')).toContainText('No Copilot transcripts found.')
+      await expect(main.locator('.source-summary')).toContainText('VS Code: No sessions')
+      await expect(main.locator('.source-summary')).toContainText('Claude Code: No sessions')
       assert.deepEqual(errors, [])
     } finally {
       if (application) await application.close()
@@ -755,17 +982,52 @@ test(
         await reminder.evaluate(() => document.documentElement.scrollWidth > innerWidth),
         false,
       )
+      assert.deepEqual(
+        await reminder.evaluate(() =>
+          [document.documentElement, document.body, document.getElementById('root')].map(
+            (element) => getComputedStyle(element).backgroundColor,
+          ),
+        ),
+        ['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)'],
+      )
+      assert.equal(
+        await reminder
+          .locator('.alert-window')
+          .evaluate((element) => getComputedStyle(element).transform),
+        'none',
+      )
       mkdirSync('.artifacts', { recursive: true })
       await reminder.screenshot({
         path: '.artifacts/top-notification.png',
         animations: 'disabled',
         scale: 'css',
       })
+      await reminder.clock.pauseAt(new Date((await reminder.evaluate(() => Date.now())) + 1))
+      await reminder.evaluate(() => window.pulse.showAlerts())
       const previousSequence = (await reminder.evaluate(() => window.pulse.getAlerts())).popup
         .sequence
-      await reminder.clock.fastForward(5000)
+      await expect(reminder.locator('.alert-window')).toHaveAttribute(
+        'data-popup-sequence',
+        String(previousSequence),
+      )
+      await reminder.clock.fastForward(2000)
+      await reminder.locator('.alert-window').hover()
+      await reminder.clock.fastForward(10000)
+      await expect(reminder.locator('.alert-window')).not.toHaveClass(/alert-fading/)
+      await reminder.getByRole('button', { name: 'Hide notification', exact: true }).focus()
+      await reminder.mouse.move(-20, -20)
+      await reminder.clock.fastForward(10000)
+      await expect(reminder.locator('.alert-window')).not.toHaveClass(/alert-fading/)
+      await reminder
+        .getByRole('button', { name: 'Hide notification', exact: true })
+        .evaluate((element) => element.blur())
+      await reminder.clock.fastForward(2900)
+      await expect(reminder.locator('.alert-window')).not.toHaveClass(/alert-fading/)
+      await reminder.clock.fastForward(150)
       await expect(reminder.locator('.alert-window')).toHaveClass(/alert-fading/)
-      await reminder.clock.fastForward(400)
+      await reminder.clock.runFor(400)
+      await expect(reminder.locator('.alert-window')).toHaveCSS('opacity', '0')
+      await reminder.clock.runFor(700)
       await expect
         .poll(async () =>
           application.evaluate(({ BrowserWindow }) =>
@@ -797,6 +1059,7 @@ test(
         true,
       )
       await reminder.getByRole('button', { name: 'Hide notification', exact: true }).click()
+      await reminder.clock.runFor(1100)
       await expect
         .poll(async () =>
           application.evaluate(({ BrowserWindow }) =>
@@ -810,7 +1073,19 @@ test(
       await reminder.evaluate(() => window.pulse.showAlerts())
       await expect(reminder.locator('.alert-more')).toHaveText('+1 more')
       const currentAlerts = (await reminder.evaluate(() => window.pulse.getAlerts())).items
+      await reminder.getByRole('button', { name: 'Hide notification', exact: true }).click()
+      await reminder.clock.runFor(1100)
       await reminder.evaluate((id) => window.pulse.dismissAlert(id), currentAlerts[0].id)
+      await expect(reminder.locator('h1')).toHaveText('Input needed in VS Code')
+      await reminder.clock.runFor(100)
+      assert.equal(
+        await application.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()
+            .find((window) => window.webContents.getURL().includes('view=alerts'))
+            .isVisible(),
+        ),
+        false,
+      )
       appendFileSync(
         path.join(transcripts, 'two.jsonl'),
         JSON.stringify({

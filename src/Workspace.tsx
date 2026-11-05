@@ -61,6 +61,7 @@ import {
   replyMarker,
   relativeTime,
   serializeSessions,
+  sessionDuration,
   statusLabels,
 } from './sessions'
 import type { Provider, Session, SessionFilter, SessionStatus } from './sessions'
@@ -294,14 +295,16 @@ function SessionCard({
         <span
           className="duration"
           title={
-            session.source === 'vscode' ? 'Time since last transcript activity' : 'Elapsed time'
+            session.status === 'running'
+              ? 'Current request elapsed time'
+              : 'Time since last activity'
           }
         >
           <Clock3 size={12} />
-          {session.source === 'vscode' ? `Idle ${idleTime(session, now)}` : elapsed(session, now)}
+          {sessionDuration(session, now)}
         </span>
       </div>
-      {session.source === 'vscode' && (
+      {session.source && (
         <p className="session-progress" title={session.events.at(-1)?.text}>
           {session.events.at(-1)?.text}
         </p>
@@ -313,14 +316,14 @@ function SessionCard({
 function Workspace() {
   const [sessions, setSessions] = useState<Session[]>(() => (desktop ? [] : initialSessions()))
   const [feed, setFeed] = useState<PulseSessionFeed>({
-    source: desktop ? 'vscode' : 'demo',
+    source: desktop ? 'live' : 'demo',
     state: desktop ? 'connecting' : 'demo',
-    message: desktop ? 'Reading local Copilot transcripts...' : 'Sample sessions',
+    message: desktop ? 'Reading local agent sessions...' : 'Sample sessions',
     sessions: [],
     scannedAt: null,
     revision: -1,
   })
-  const live = feed.source === 'vscode'
+  const live = feed.source !== 'demo'
   const [preferences, setPreferences] = useState(initialPreferences)
   const [selectedId, setSelectedId] = useState<string | null>('014')
   const [filter, setFilter] = useState<SessionFilter>('all')
@@ -360,7 +363,7 @@ function Workspace() {
       setCollection('active')
       setToast(null)
     }
-    if (incoming.source === 'vscode') {
+    if (incoming.source !== 'demo') {
       setSessions(incoming.sessions)
       if (
         sourceChanged ||
@@ -410,6 +413,16 @@ function Workspace() {
 
   const markOpened = useEffectEvent((reference: PulseSessionReference) => {
     const session = sessions.find((item) => item.id === reference.sessionId)
+    if (!session && reference.status === 'completed') {
+      setSeenReplies((current) => ({
+        ...current,
+        [reference.sessionId]: replyMarker({
+          ...reference,
+          requestId: reference.requestId ?? undefined,
+        }),
+      }))
+      return
+    }
     if (
       session?.status === 'completed' &&
       (session.requestId ?? null) === reference.requestId &&
@@ -471,7 +484,7 @@ function Workspace() {
     oscillator.stop(audio.currentTime + 0.45)
   }
 
-  async function chooseSource(source: 'vscode' | 'demo') {
+  async function chooseSource(source: 'live' | 'demo') {
     try {
       await desktop?.setSessionSource(source)
     } catch {
@@ -495,16 +508,21 @@ function Workspace() {
     try {
       const session = sessions.find((item) => item.id === id)
       if (!session) return
-      const result = await desktop?.openVSCode(id, referenceForSession(session))
+      const result = await (desktop?.openSession ?? desktop?.openVSCode)?.(
+        id,
+        referenceForSession(session),
+      )
       if (result?.message)
         setToast({
           title:
             result.mode === 'unavailable'
-              ? result.code === 'session-not-found' || result.code === 'session-unreadable'
-                ? 'Session unavailable'
-                : result.code === 'navigation-failed'
-                  ? 'VS Code navigation failed'
-                  : 'VS Code connection unavailable'
+              ? result.code === 'terminal-navigation-unavailable'
+                ? 'Continue in Claude Code'
+                : result.code === 'session-not-found' || result.code === 'session-unreadable'
+                  ? 'Session unavailable'
+                  : result.code === 'navigation-failed'
+                    ? 'VS Code navigation failed'
+                    : 'VS Code connection unavailable'
               : result.mode === 'stale'
                 ? 'Session changed'
                 : 'Chat opened in an editor',
@@ -513,8 +531,8 @@ function Workspace() {
         })
     } catch {
       setToast({
-        title: 'VS Code could not be opened',
-        detail: 'The workspace or VS Code URL handler is unavailable.',
+        title: 'Session could not be opened',
+        detail: 'Return to the original application or check its connection.',
         tone: 'info',
       })
     }
@@ -525,7 +543,7 @@ function Workspace() {
     setOpeningAlertId(alert.id)
     setAlertError(null)
     try {
-      const result = await desktop.openVSCode(alert.sessionId, {
+      const result = await (desktop.openSession ?? desktop.openVSCode)(alert.sessionId, {
         ...alert.reference,
         alertId: alert.id,
       })
@@ -537,7 +555,7 @@ function Workspace() {
     } catch {
       setAlertError({
         id: alert.id,
-        text: 'This session is unavailable. Retry after reconnecting VS Code, or ignore this reminder.',
+        text: 'This session is unavailable. Return to its original application or ignore this reminder.',
       })
     } finally {
       setOpeningAlertId(null)
@@ -880,7 +898,7 @@ function Workspace() {
       </div>
       {toast.sessionId && (
         <IconButton
-          label={live ? 'Open reply in VS Code' : 'View completed session'}
+          label={live ? 'Open reply' : 'View completed session'}
           onClick={() => {
             if (live) {
               void openVSCode(toast.sessionId!)
@@ -929,7 +947,9 @@ function Workspace() {
                 className={`rail-session mini-${item.status}`}
                 title={`${item.project}\n${item.task}\n${statusLabels[item.status]}`}
                 aria-label={`Open ${item.project}: ${item.task}`}
-                onClick={() => (live ? void openVSCode(item.id) : openWorkspace(item.id))}
+                onClick={() =>
+                  item.source === 'vscode' ? void openVSCode(item.id) : openWorkspace(item.id)
+                }
               >
                 <ProviderIcon provider={item.provider} size={18} />
                 <span className={`rail-status rail-status-${item.status}`} />
@@ -978,7 +998,7 @@ function Workspace() {
             <Maximize2 size={16} />
           </IconButton>
           <span className="rail-demo" title={feed.message}>
-            {live ? 'CODE' : 'DEMO'}
+            {live ? 'LIVE' : 'DEMO'}
           </span>
         </footer>
       </div>
@@ -990,7 +1010,7 @@ function Workspace() {
         <header className="mini-header app-drag">
           <Brand compact />
           <span className="mini-demo" title={feed.message}>
-            {live ? 'VS CODE' : 'DEMO'}
+            {live ? 'LIVE' : 'DEMO'}
           </span>
           <div className="app-no-drag mini-window-actions">
             <IconButton label="Collapse sidebar" onClick={() => void toggleCollapsed()}>
@@ -1044,8 +1064,12 @@ function Workspace() {
               <button
                 key={session.id}
                 className={`mini-session mini-${session.status}`}
-                title={`${session.project}\n${session.task}`}
-                onClick={() => (live ? void openVSCode(session.id) : openWorkspace(session.id))}
+                title={`${session.project}\n${session.task}${session.source === 'claude' ? '\nView session in Pulse' : ''}`}
+                onClick={() =>
+                  session.source === 'vscode'
+                    ? void openVSCode(session.id)
+                    : openWorkspace(session.id)
+                }
               >
                 <span className="mini-provider">
                   <ProviderIcon provider={session.provider} size={20} />
@@ -1059,8 +1083,14 @@ function Workspace() {
                   {live && <span className="mini-progress">{session.events.at(-1)?.text}</span>}
                 </span>
                 <span className="mini-session-end">
-                  <span title={live ? 'Time since last transcript activity' : 'Elapsed time'}>
-                    {live ? `Idle ${idleTime(session, now)}` : elapsed(session, now)}
+                  <span
+                    title={
+                      session.status === 'running'
+                        ? 'Current request elapsed time'
+                        : 'Time since last activity'
+                    }
+                  >
+                    {sessionDuration(session, now)}
                   </span>
                   <ArrowUpRight size={13} />
                 </span>
@@ -1159,7 +1189,7 @@ function Workspace() {
             <Radio size={18} />
           </span>
           <div>
-            <strong>{live ? 'VS Code / Copilot' : 'Local preview'}</strong>
+            <strong>{live ? 'Live sessions' : 'Local preview'}</strong>
             <span>{live ? feed.message : 'No agents connected'}</span>
           </div>
           <span className="neutral-dot" />
@@ -1198,7 +1228,7 @@ function Workspace() {
           <div className="topbar-actions">
             <span className="demo-badge">
               {live ? <Radio size={12} /> : <FlaskConical size={12} />}
-              {live ? 'Local transcripts' : 'Demo data'}
+              {live ? 'Local sessions' : 'Demo data'}
             </span>
             <span className="topbar-divider" />
             <IconButton
@@ -1246,16 +1276,16 @@ function Workspace() {
               </h1>
               <p>
                 {view === 'activity'
-                  ? `${allEvents.length} events across your ${live ? 'VS Code' : 'sample'} sessions`
+                  ? `${allEvents.length} events across your ${live ? 'live' : 'sample'} sessions`
                   : `${running.length} in progress. ${attention.length} need your attention.`}
               </p>
             </div>
             <div className="heading-actions">
               {desktop && (
                 <div className="source-switch" role="group" aria-label="Session source">
-                  <button aria-pressed={live} onClick={() => void chooseSource('vscode')}>
+                  <button aria-pressed={live} onClick={() => void chooseSource('live')}>
                     <Monitor size={14} />
-                    VS Code
+                    Live
                   </button>
                   <button aria-pressed={!live} onClick={() => void chooseSource('demo')}>
                     <FlaskConical size={14} />
@@ -1352,7 +1382,7 @@ function Workspace() {
                     ) : stat.filter === 'completed' ? (
                       'this workspace'
                     ) : live ? (
-                      'VS Code / Copilot'
+                      'across connected agents'
                     ) : (
                       'across 3 agents'
                     )}
@@ -1553,9 +1583,11 @@ function Workspace() {
                     <div>
                       <dt>
                         <Clock3 size={13} />
-                        Elapsed
+                        {selected.source === 'claude' ? 'Observed runtime' : 'Elapsed'}
                       </dt>
-                      <dd className="mono">{elapsed(selected, now)}</dd>
+                      <dd className="mono">
+                        {selected.status === 'idle' ? 'Idle' : elapsed(selected, now)}
+                      </dd>
                     </div>
                     <div>
                       <dt>
@@ -1564,11 +1596,11 @@ function Workspace() {
                       </dt>
                       <dd>{live ? 'Not reported' : `${selected.files} files`}</dd>
                     </div>
-                    {live && (
+                    {live && selected.status !== 'running' && (
                       <div>
                         <dt>
                           <Activity size={13} />
-                          Idle
+                          Last activity
                         </dt>
                         <dd className="mono" title={new Date(selected.updatedAt).toLocaleString()}>
                           {idleTime(selected, now)}
@@ -1649,6 +1681,12 @@ function Workspace() {
                     )}
                     <button
                       className="button button-secondary open-session-button"
+                      disabled={selected.source === 'claude'}
+                      title={
+                        selected.source === 'claude'
+                          ? 'Original terminal navigation is not connected yet. Continue in your existing Claude Code terminal.'
+                          : undefined
+                      }
                       onClick={() =>
                         live
                           ? void openVSCode(selected.id)
@@ -1660,7 +1698,11 @@ function Workspace() {
                       }
                     >
                       <SquareTerminal size={15} />
-                      {live ? 'Open in VS Code' : 'Open session'}
+                      {live
+                        ? selected.source === 'claude'
+                          ? 'Continue in terminal'
+                          : 'Open in VS Code'
+                        : 'Open session'}
                       <ArrowUpRight size={15} />
                     </button>
                     {!live && selected.status === 'running' && (
@@ -1731,7 +1773,7 @@ function Workspace() {
           <footer className="page-footer">
             <span>
               <span className="neutral-dot" />
-              {live ? 'VS Code workspace' : 'Demo workspace'}
+              {live ? 'Live workspace' : 'Demo workspace'}
             </span>
             <span>
               pulse <span className="footer-slash">/</span> v0.1.0
@@ -1837,7 +1879,7 @@ function Workspace() {
                 <Monitor size={18} />
                 <div>
                   <strong>
-                    {live ? 'VS Code / Copilot' : desktop ? 'Desktop preview' : 'Browser preview'}
+                    {live ? 'Live sessions' : desktop ? 'Desktop preview' : 'Browser preview'}
                   </strong>
                   <span>{live ? feed.message : 'Demo data only. No agent adapter connected.'}</span>
                 </div>

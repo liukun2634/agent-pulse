@@ -16,9 +16,10 @@ export interface Session {
   task: string
   branch: string
   provider: Provider
-  source?: 'vscode'
+  source?: 'vscode' | 'claude'
   statusDetail?: string
   requestId?: string
+  requestStartedAt?: number
   archivedAt?: number
   status: SessionStatus
   startedAt: number
@@ -66,7 +67,7 @@ export const statusLabels: Record<SessionStatus, string> = {
   failed: 'Failed',
   disconnected: 'Disconnected',
   unknown: 'Status unknown',
-  idle: 'No recent activity',
+  idle: 'Idle',
   cancelled: 'Stopped',
 }
 
@@ -220,8 +221,7 @@ export function changeStatus(
   now = Date.now(),
 ): Session[] {
   const target = sessions.find((session) => session.id === id)
-  if (!target || target.source === 'vscode' || !transitions[target.status].includes(status))
-    return sessions
+  if (!target || target.source || !transitions[target.status].includes(status)) return sessions
 
   const messages: Record<SessionStatus, string> = {
     running: 'Execution resumed',
@@ -292,7 +292,15 @@ export function formatDuration(milliseconds: number): string {
 }
 
 export function elapsed(session: Session, now: number): string {
-  return formatDuration((session.finishedAt ?? now) - session.startedAt)
+  return formatDuration(
+    (session.finishedAt ?? now) - (session.requestStartedAt ?? session.startedAt),
+  )
+}
+
+export function sessionDuration(session: Session, now: number): string {
+  if (session.status === 'running') return elapsed(session, now)
+  if (session.status === 'idle') return 'Idle'
+  return session.source ? `Idle ${idleTime(session, now)}` : elapsed(session, now)
 }
 
 export function idleTime(session: Session, now: number): string {

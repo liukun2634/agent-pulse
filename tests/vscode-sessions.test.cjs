@@ -273,6 +273,23 @@ test('missing storage is explicit and never falls back to demo data', async () =
   assert.deepEqual(snapshot.sessions, [])
 })
 
+test('execution timing follows the current request rather than the session age', () => {
+  const state = createTranscript('timing', 'project')
+  const start = Date.now() - 600000
+  applyEvent(state, {
+    type: 'user.message',
+    timestamp: new Date(start).toISOString(),
+    data: { content: 'First request' },
+  })
+  applyEvent(state, {
+    type: 'user.message',
+    timestamp: new Date(start + 500000).toISOString(),
+    data: { content: 'Second request' },
+  })
+  assert.equal(toSession(state).startedAt, start)
+  assert.equal(toSession(state).requestStartedAt, start + 500000)
+})
+
 test('polling backs off with inactivity and clamps future timestamps', () => {
   assert.equal(pollInterval(now, now), 2000)
   assert.equal(pollInterval(now, now + 30000), 5000)

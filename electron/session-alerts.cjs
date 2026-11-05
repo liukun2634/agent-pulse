@@ -61,7 +61,9 @@ function createAlertTracker() {
           status: session.status,
           title:
             session.status === 'waiting'
-              ? 'Input needed in VS Code'
+              ? session.source === 'claude'
+                ? 'Input needed in Claude Code'
+                : 'Input needed in VS Code'
               : session.status === 'completed'
                 ? 'Rely Ready'
                 : 'Session reported an error',

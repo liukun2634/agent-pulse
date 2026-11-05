@@ -5,4 +5,12 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   base: './',
   plugins: [react()],
+  optimizeDeps: {
+    entries: ['index.html'],
+  },
+  server: {
+    watch: {
+      ignored: ['**/.artifacts/**', '**/release/**', '**/test-results/**'],
+    },
+  },
 })

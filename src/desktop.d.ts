@@ -26,7 +26,7 @@ declare global {
   }
 
   interface PulseSessionFeed {
-    source: 'demo' | 'vscode'
+    source: 'demo' | 'live'
     state: 'demo' | 'connecting' | 'connected' | 'empty' | 'unavailable' | 'error'
     message: string
     sessions: Session[]
@@ -47,12 +47,22 @@ declare global {
       openAlertInbox: () => Promise<void>
       onOpenAlertInbox: (listener: () => void) => () => void
       hideAlertPopup: (sequence: number) => Promise<void>
+      readyAlertPopup: (sequence: number) => Promise<void>
       setSystemNotifications: (enabled: boolean) => Promise<PulseAlertState>
       onAlerts: (listener: (state: PulseAlertState) => void) => () => void
       getSessionFeed: () => Promise<PulseSessionFeed>
       setSessionArchived: (id: string, archived: boolean) => Promise<void>
-      setSessionSource: (source: 'demo' | 'vscode') => Promise<PulseSessionFeed>
+      setSessionSource: (source: 'demo' | 'live') => Promise<PulseSessionFeed>
       refreshSessions: () => Promise<PulseSessionFeed>
+      openSession: (
+        id: string,
+        reference?: SessionReference,
+      ) => Promise<{
+        mode: 'chat-view' | 'chat-editor' | 'unavailable' | 'stale'
+        verified: boolean
+        code?: string
+        message?: string
+      }>
       openVSCode: (
         id: string,
         reference?: SessionReference,

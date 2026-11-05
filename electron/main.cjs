@@ -13,6 +13,8 @@ const {
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { createVSCodeSource } = require('./vscode-sessions.cjs')
+const { createClaudeSource } = require('./claude-sessions.cjs')
+const { createLiveSources } = require('./live-sources.cjs')
 const { openSession } = require('../vscode-companion/bridge.cjs')
 const { createAlertTracker, sessionReference, matchesReference } = require('./session-alerts.cjs')
 const { createAlertHistory } = require('./alert-history.cjs')
@@ -20,20 +22,21 @@ const fs = require('node:fs')
 
 const root = path.join(__dirname, '..')
 const entry = path.join(root, 'dist', 'index.html')
-const iconRoot = app.isPackaged
-  ? path.join(process.resourcesPath, 'icons')
-  : path.join(root, 'public')
+const packagedApp = app.isPackaged && !process.defaultApp
+const iconRoot = packagedApp ? path.join(process.resourcesPath, 'icons') : path.join(root, 'public')
 const iconPath = path.join(iconRoot, process.platform === 'win32' ? 'pulse.ico' : 'pulse.png')
 const testMode = process.env.PULSE_TEST_MODE === '1'
 const devUrl = process.env.PULSE_DEV_SERVER_URL
 const windows = new Set()
 let mainWindow
 let miniWindow
+let miniReady = false
 let alertWindow
 let pendingAlerts = []
 let alertRevision = 0
 let popupSequence = 0
 let popupIds = []
+let popupRevealPending = false
 let systemNotifications = false
 const alertTracker = createAlertTracker()
 let alertHistory
@@ -46,26 +49,43 @@ let miniState = { collapsed: false, edge: 'right' }
 let expandedMiniSize = [360, 600]
 const vscodeSource = createVSCodeSource(
   process.env.PULSE_VSCODE_STORAGE ||
-    path.join(app.getPath('appData'), 'Code', 'User', 'workspaceStorage'),
+    (testMode
+      ? path.join(process.env.PULSE_TEST_DATA || app.getPath('temp'), 'no-vscode-storage')
+      : path.join(app.getPath('appData'), 'Code', 'User', 'workspaceStorage')),
   process.env.PULSE_VSCODE_SCHEME,
 )
+const claudeSource = createClaudeSource(
+  testMode
+    ? {
+        query: async () =>
+          process.env.PULSE_TEST_CLAUDE
+            ? fs.promises.readFile(process.env.PULSE_TEST_CLAUDE, 'utf8')
+            : '[]',
+      }
+    : {},
+)
+const initializedSources = new Set()
+const liveSources = createLiveSources({ vscode: vscodeSource, claude: claudeSource }, (source) => {
+  if (!quitting) publishFeed(feed.source === 'demo' ? feed : liveSources.view(feed.source), source)
+})
 let feed = {
-  source: testMode && !process.env.PULSE_VSCODE_STORAGE ? 'demo' : 'vscode',
+  source: testMode && !process.env.PULSE_VSCODE_STORAGE ? 'demo' : 'live',
   state: 'connecting',
-  message: 'Reading local Copilot transcripts...',
+  message: 'Reading local agent sessions...',
   sessions: [],
   scannedAt: null,
   revision: 0,
 }
 let feedTimer
-let scanning = false
-let sourceGeneration = 0
-
-function publishFeed(next) {
-  const freshAlerts =
-    next.source === 'vscode' && next.scannedAt !== null && next.state !== 'unavailable'
-      ? alertTracker.update(next.sessions)
-      : []
+function publishFeed(next, updatedSource) {
+  const monitored = liveSources.sessions()
+  const freshAlerts = alertTracker.update(monitored).map((alert) => ({
+    ...alert,
+    initial:
+      alert.initial ||
+      !initializedSources.has(monitored.find((item) => item.id === alert.sessionId)?.source),
+  }))
+  if (updatedSource) initializedSources.add(updatedSource)
   feed = {
     ...next,
     sessions: next.sessions.map((item) => ({ ...item, archivedAt: archivedSessions.get(item.id) })),
@@ -74,7 +94,7 @@ function publishFeed(next) {
   for (const window of windows) window.webContents.send('pulse:session-feed', feed)
   const previousCount = pendingAlerts.length
   pendingAlerts = pendingAlerts.filter((alert) => {
-    const current = feed.sessions.find((item) => item.id === alert.sessionId)
+    const current = monitored.find((item) => item.id === alert.sessionId)
     if (!current || ['unknown', 'disconnected'].includes(current.status)) return true
     if (alert.requestId && current.requestId && alert.requestId !== current.requestId) return false
     if (alert.status !== 'waiting' && alert.requestId) return true
@@ -109,7 +129,7 @@ function alertState() {
 }
 
 function persistAlertHistory() {
-  if (!alertHistory || feed.source !== 'vscode') return false
+  if (!alertHistory) return false
   const previous = alertHistory.warning
   alertHistory.save(pendingAlerts)
   return previous !== alertHistory.warning
@@ -123,8 +143,10 @@ function publishAlerts() {
     !pendingAlerts.some((alert) => popupIds.includes(alert.id)) &&
     alertWindow &&
     !alertWindow.isDestroyed()
-  )
+  ) {
+    popupRevealPending = false
     alertWindow.hide()
+  }
   if (tray)
     tray.setToolTip(
       pendingAlerts.length
@@ -133,26 +155,33 @@ function publishAlerts() {
     )
 }
 
+function revealAlertWindow(sequence) {
+  if (
+    sequence !== popupSequence ||
+    !popupRevealPending ||
+    !popupIds.length ||
+    !alertWindow ||
+    alertWindow.isDestroyed()
+  )
+    return
+  popupRevealPending = false
+  const anchor = windowMode === 'mini' ? miniWindow : mainWindow
+  const area =
+    anchor && !anchor.isDestroyed()
+      ? screen.getDisplayMatching(anchor.getBounds()).workArea
+      : screen.getPrimaryDisplay().workArea
+  const bounds = alertWindow.getBounds()
+  alertWindow.setPosition(area.x + Math.round((area.width - bounds.width) / 2), area.y + 16)
+  alertWindow.showInactive()
+}
+
 function showAlertWindow(ids = pendingAlerts.map((alert) => alert.id)) {
   popupIds = ids.filter((id) => pendingAlerts.some((alert) => alert.id === id))
   if (!popupIds.length) return
   popupSequence++
+  popupRevealPending = true
   publishAlerts()
-  const reveal = () => {
-    if (!pendingAlerts.length || alertWindow.isDestroyed()) return
-    const anchor = windowMode === 'mini' ? miniWindow : mainWindow
-    const area =
-      anchor && !anchor.isDestroyed()
-        ? screen.getDisplayMatching(anchor.getBounds()).workArea
-        : screen.getPrimaryDisplay().workArea
-    const bounds = alertWindow.getBounds()
-    alertWindow.setPosition(area.x + Math.round((area.width - bounds.width) / 2), area.y + 16)
-    alertWindow.showInactive()
-  }
-  if (alertWindow && !alertWindow.isDestroyed()) {
-    if (!alertWindow.webContents.isLoading()) reveal()
-    return
-  }
+  if (alertWindow && !alertWindow.isDestroyed()) return
   alertWindow = new BrowserWindow({
     width: Math.min(520, screen.getPrimaryDisplay().workArea.width - 32),
     height: 112,
@@ -176,7 +205,6 @@ function showAlertWindow(ids = pendingAlerts.map((alert) => alert.id)) {
     },
   })
   secureWindow(alertWindow)
-  alertWindow.once('ready-to-show', reveal)
   alertWindow.on('close', (event) => {
     if (!quitting) {
       event.preventDefault()
@@ -187,24 +215,7 @@ function showAlertWindow(ids = pendingAlerts.map((alert) => alert.id)) {
 }
 
 async function refreshFeed(force = false) {
-  if (scanning || feed.source !== 'vscode') return feed
-  scanning = true
-  const generation = sourceGeneration
-  try {
-    const next = await vscodeSource.scan(Date.now(), { force })
-    if (generation === sourceGeneration) publishFeed(next)
-  } catch {
-    if (generation === sourceGeneration)
-      publishFeed({
-        source: 'vscode',
-        state: 'error',
-        message: 'VS Code scan failed.',
-        sessions: [],
-        scannedAt: Date.now(),
-      })
-  } finally {
-    scanning = false
-  }
+  await liveSources.refresh(force)
   return feed
 }
 
@@ -232,8 +243,10 @@ function secureWindow(window) {
   if (process.platform === 'win32')
     window.setAppDetails({
       appId: 'dev.pulse.agent-monitor',
-      appIconPath: iconPath,
+      appIconPath: process.execPath,
       appIconIndex: 0,
+      relaunchDisplayName: 'Agent Pulse',
+      relaunchCommand: packagedApp ? `"${process.execPath}"` : `"${process.execPath}" "${root}"`,
     })
   window.on('closed', () => windows.delete(window))
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -282,9 +295,6 @@ function createMain() {
   mainWindow.on('minimize', () => {
     if (!quitting && windowMode !== 'mini') showMini()
   })
-  mainWindow.on('restore', () => {
-    if (!quitting && windowMode === 'mini') showMini()
-  })
   mainWindow.on('close', (event) => {
     if (!quitting && tray) {
       event.preventDefault()
@@ -295,11 +305,17 @@ function createMain() {
 }
 
 function showMain(sessionId, maximize = false) {
+  const targetSession = liveSources.sessions().find((item) => item.id === sessionId)
+  if (targetSession && feed.source === 'demo') publishFeed(liveSources.view('live'))
   windowMode = 'workspace'
   if (!mainWindow || mainWindow.isDestroyed()) createMain()
+  if (miniWindow && !miniWindow.isDestroyed()) {
+    miniWindow.setSkipTaskbar(true)
+    miniWindow.hide()
+  }
+  mainWindow.setSkipTaskbar(false)
   if (mainWindow.isMinimized()) mainWindow.restore()
   if (maximize) mainWindow.maximize()
-  if (miniWindow && !miniWindow.isDestroyed()) miniWindow.hide()
   mainWindow.show()
   mainWindow.focus()
   if (typeof sessionId === 'string') {
@@ -351,27 +367,40 @@ function updateMiniState(nextState) {
 
 function showMini() {
   windowMode = 'mini'
-  const area =
-    mainWindow && !mainWindow.isDestroyed()
+  const existing = miniWindow && !miniWindow.isDestroyed()
+  const area = existing
+    ? screen.getDisplayMatching(
+        miniWindow.isMinimized() ? miniWindow.getNormalBounds() : miniWindow.getBounds(),
+      ).workArea
+    : mainWindow && !mainWindow.isDestroyed()
       ? screen.getDisplayMatching(
           mainWindow.isMinimized() ? mainWindow.getNormalBounds() : mainWindow.getBounds(),
         ).workArea
       : screen.getPrimaryDisplay().workArea
   const reveal = () => {
     if (windowMode !== 'mini') return
-    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMinimized()) {
-      if (!mainWindow.isVisible()) mainWindow.showInactive()
-      mainWindow.minimize()
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setSkipTaskbar(true)
+      mainWindow.hide()
     }
+    miniWindow.setSkipTaskbar(false)
     if (miniWindow.isMinimized()) miniWindow.restore()
-    alignMini(area, area.y + 16)
+    if (!existing) alignMini(area, area.y + 16)
+    else {
+      const bounds = miniWindow.getBounds()
+      const horizontal = Math.max(area.x, Math.min(bounds.x, area.x + area.width - bounds.width))
+      const vertical = Math.max(area.y, Math.min(bounds.y, area.y + area.height - bounds.height))
+      if (horizontal !== bounds.x || vertical !== bounds.y)
+        miniWindow.setPosition(horizontal, vertical, false)
+    }
     miniWindow.show()
     miniWindow.focus()
   }
-  if (miniWindow && !miniWindow.isDestroyed()) {
-    reveal()
+  if (existing) {
+    if (miniReady) reveal()
     return
   }
+  miniReady = false
   miniWindow = new BrowserWindow({
     width: miniState.collapsed ? 76 : expandedMiniSize[0],
     height: Math.min(miniState.collapsed ? 540 : expandedMiniSize[1], area.height - 32),
@@ -397,7 +426,10 @@ function showMini() {
     },
   })
   secureWindow(miniWindow)
-  miniWindow.once('ready-to-show', reveal)
+  miniWindow.once('ready-to-show', () => {
+    miniReady = true
+    reveal()
+  })
   void loadWindow(miniWindow, 'mini')
 }
 
@@ -430,7 +462,14 @@ ipcMain.handle('pulse:open-alert-inbox', (event) => {
 })
 ipcMain.handle('pulse:hide-alert-popup', (event, sequence) => {
   if (trustedWindow(event) !== alertWindow) throw new Error('Invalid popup window.')
-  if (sequence === popupSequence) alertWindow.hide()
+  if (sequence === popupSequence) {
+    popupRevealPending = false
+    alertWindow.hide()
+  }
+})
+ipcMain.handle('pulse:ready-alert-popup', (event, sequence) => {
+  if (trustedWindow(event) !== alertWindow) throw new Error('Invalid popup window.')
+  revealAlertWindow(sequence)
 })
 ipcMain.handle('pulse:set-system-notifications', (event, enabled) => {
   trustedWindow(event)
@@ -450,11 +489,7 @@ ipcMain.handle('pulse:get-session-feed', (event) => {
 })
 ipcMain.handle('pulse:set-session-archived', (event, id, archived) => {
   trustedWindow(event)
-  if (
-    feed.source !== 'vscode' ||
-    typeof archived !== 'boolean' ||
-    !feed.sessions.some((item) => item.id === id)
-  )
+  if (typeof archived !== 'boolean' || !liveSources.sessions().some((item) => item.id === id))
     throw new TypeError('Invalid archive request.')
   const next = new Map(archivedSessions)
   if (archived) next.set(id, Date.now())
@@ -471,39 +506,25 @@ ipcMain.handle('pulse:set-session-archived', (event, id, archived) => {
 })
 ipcMain.handle('pulse:set-session-source', (event, source) => {
   trustedWindow(event)
-  if (!['demo', 'vscode'].includes(source)) throw new TypeError('Invalid session source.')
+  if (!['demo', 'live'].includes(source)) throw new TypeError('Invalid session source.')
   if (source !== feed.source) {
-    persistAlertHistory()
-    sourceGeneration++
-    alertTracker.reset()
-    pendingAlerts = source === 'vscode' ? alertHistory.load() : []
-    popupIds = []
-    popupSequence++
-    publishFeed({
-      source,
-      state: source === 'demo' ? 'demo' : 'connecting',
-      message: source === 'demo' ? 'Sample sessions' : 'Reading local Copilot transcripts...',
-      sessions: [],
-      scannedAt: null,
-    })
-    publishAlerts()
+    publishFeed(
+      source === 'demo'
+        ? { source, state: 'demo', message: 'Sample sessions', sessions: [], scannedAt: null }
+        : liveSources.view(source),
+    )
   }
-  return refreshFeed(true)
+  void refreshFeed(true)
+  return feed
 })
 ipcMain.handle('pulse:refresh-sessions', (event) => {
   trustedWindow(event)
   return refreshFeed(true)
 })
 async function openVSCodeSession(id, expected) {
-  if (
-    feed.source !== 'vscode' ||
-    typeof id !== 'string' ||
-    !feed.sessions.some((item) => item.id === id)
-  )
-    throw new TypeError('Unknown VS Code session.')
-  const target = vscodeSource.sessionTarget(id)
-  if (!target) throw new Error('The workspace is no longer available.')
-  const openedSnapshot = feed.sessions.find((item) => item.id === id)
+  if (typeof id !== 'string' || !liveSources.sessions().some((item) => item.id === id))
+    throw new TypeError('Unknown session.')
+  const openedSnapshot = liveSources.sessions().find((item) => item.id === id)
   if (
     expected &&
     (!matchesReference(openedSnapshot, expected) ||
@@ -515,8 +536,17 @@ async function openVSCodeSession(id, expected) {
       verified: false,
       message: 'This request has changed. Select the current session or reminder and try again.',
     }
+  if (openedSnapshot.source === 'claude')
+    return {
+      mode: 'unavailable',
+      verified: false,
+      code: 'terminal-navigation-unavailable',
+      message:
+        'Continue in your existing Claude Code terminal. Pulse cannot locate its original terminal tab yet; no new session was started.',
+    }
+  const target = vscodeSource.sessionTarget(id)
+  if (!target) throw new Error('The workspace is no longer available.')
   const reference = sessionReference(openedSnapshot)
-  const generation = sourceGeneration
   const pendingIds = new Set(
     pendingAlerts
       .filter(
@@ -529,12 +559,8 @@ async function openVSCodeSession(id, expected) {
   )
   try {
     const opened = await openSession(target.workspacePath, target.scheme, target.sessionId)
-    const current = feed.sessions.find((item) => item.id === id)
-    if (
-      opened.verified &&
-      generation === sourceGeneration &&
-      matchesReference(current, reference)
-    ) {
+    const current = liveSources.sessions().find((item) => item.id === id)
+    if (opened.verified && matchesReference(current, reference)) {
       pendingAlerts = pendingAlerts.filter((alert) => !pendingIds.has(alert.id))
       publishAlerts()
       for (const window of windows) window.webContents.send('pulse:session-opened', reference)
@@ -550,6 +576,10 @@ async function openVSCodeSession(id, expected) {
   }
 }
 ipcMain.handle('pulse:open-vscode', async (event, id, reference) => {
+  trustedWindow(event)
+  return openVSCodeSession(id, reference)
+})
+ipcMain.handle('pulse:open-session', async (event, id, reference) => {
   trustedWindow(event)
   return openVSCodeSession(id, reference)
 })
@@ -604,7 +634,7 @@ function showSystemNotification(payload) {
   notification.on('failed', () => nativeNotifications.delete(notification))
   const sessionId =
     typeof payload.sessionId === 'string' &&
-    feed.sessions.some((item) => item.id === payload.sessionId)
+    liveSources.sessions().some((item) => item.id === payload.sessionId)
       ? payload.sessionId
       : undefined
   notification.on('click', () => {
@@ -626,8 +656,9 @@ ipcMain.handle('pulse:notify', (event, payload) => {
 })
 
 function createTray() {
-  if (!fs.existsSync(iconPath)) return
-  tray = new Tray(iconPath)
+  const icon = nativeImage.createFromPath(iconPath)
+  if (icon.isEmpty()) return
+  tray = new Tray(icon)
   tray.setToolTip('Pulse - Agent sessions')
   tray.setContextMenu(
     Menu.buildFromTemplate([
@@ -652,9 +683,13 @@ else {
       path.join(app.getPath('userData'), 'reminder-history.json'),
       alertTracker,
     )
-    if (feed.source === 'vscode') pendingAlerts = alertHistory.load()
-    powerMonitor.on('suspend', () => alertTracker.beginRecovery())
+    pendingAlerts = alertHistory.load()
+    powerMonitor.on('suspend', () => {
+      initializedSources.clear()
+      alertTracker.beginRecovery()
+    })
     powerMonitor.on('resume', () => {
+      initializedSources.clear()
       alertTracker.beginRecovery()
       void refreshFeed(true)
     })
@@ -666,7 +701,10 @@ else {
         archivedSessions = new Map(
           Object.entries(saved.archived).filter(
             ([id, at]) =>
-              id.startsWith('vscode:') && typeof at === 'number' && Number.isFinite(at) && at > 0,
+              /^(vscode|claude):/.test(id) &&
+              typeof at === 'number' &&
+              Number.isFinite(at) &&
+              at > 0,
           ),
         )
     } catch {}
@@ -690,7 +728,7 @@ else {
     persistAlertHistory()
     quitting = true
     clearInterval(feedTimer)
-    vscodeSource.close()
+    liveSources.close()
   })
   app.on('window-all-closed', () => {
     if (!tray) app.quit()

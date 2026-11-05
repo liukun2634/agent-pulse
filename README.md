@@ -8,7 +8,7 @@ Keep your agent sessions in view. Know when input is needed or a reply is ready,
 
 Agent Pulse brings your coding sessions into one local workspace. Browse and organize your work in the full window, or keep the compact side monitor nearby while your agents run.
 
-> Development preview for Windows x64. Currently supports local VS Code / GitHub Copilot.
+> Development preview for Windows x64. Monitor local VS Code / GitHub Copilot and independent Claude Code terminal sessions.
 
 ![Agent Pulse workspace with session cards, filters and activity details](site/assets/workspace.png)
 
@@ -19,7 +19,7 @@ Agent Pulse brings your coding sessions into one local workspace. Browse and org
 
 </details>
 
-Screenshots use Demo data. Claude Code and Codex integrations are planned, not connected yet.
+Screenshots use Demo data. Claude Code snapshot monitoring is available; Codex is not connected yet.
 
 ## Features
 
@@ -35,8 +35,8 @@ Screenshots use Demo data. Claude Code and Codex integrations are planned, not c
 Visit the **[Windows download page](https://liukun2634.github.io/agent-pulse/download.html)** for available builds and installation instructions. Release files are hosted on [GitHub Releases](https://github.com/liukun2634/agent-pulse/releases). If no installer is available yet, [try it from source](#development).
 
 1. Install Agent Pulse on Windows. Packaged releases do not require Node.js.
-2. Install Pulse Companion in VS Code using **Extensions: Install from VSIX** to enable conversation navigation.
-3. Open your project in VS Code, launch Pulse and select the **VS Code** source. Use **Mini monitor** to follow progress and jump back when a session needs you.
+2. For Copilot navigation, install Pulse Companion in VS Code using **Extensions: Install from VSIX**. Claude Code monitoring uses your separately installed Claude CLI, not this extension.
+3. Launch Pulse and select **Live** to see VS Code and Claude Code sessions together. Use the Agent filter to narrow the list, or **Mini monitor** to follow progress. **Demo** stays separate; switching views does not stop live monitoring.
 
 Companion setup details: [vscode-companion/README.md](vscode-companion/README.md).
 
@@ -44,9 +44,9 @@ Companion setup details: [vscode-companion/README.md](vscode-companion/README.md
 
 ## Project status
 
-Agent Pulse is actively evolving. Live monitoring currently supports local VS Code / GitHub Copilot on Windows x64; more providers and languages are planned. The browser preview uses sample data only.
+Agent Pulse is actively evolving. Claude Code currently supports session snapshots and observed input/error states; exact per-turn events and original-terminal navigation are still in development. Idle is not treated as a finished reply, and Claude runtime starts when Pulse observes execution. The browser preview uses sample data only.
 
-Session status is inferred from local VS Code records and may vary between versions. Keep Pulse running, including in the tray, to receive reminders. It observes sessions without sending messages or approving permissions on your behalf.
+Keep Pulse running, including in the tray, to receive reminders. Provider formats may vary between versions. Pulse observes sessions without sending messages, approving permissions or installing hooks on your behalf.
 
 ## Development
 

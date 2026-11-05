@@ -13,6 +13,7 @@ function createTranscript(id, project) {
     task: 'Copilot session',
     status: 'unknown',
     startedAt: null,
+    requestStartedAt: null,
     updatedAt: null,
     finishedAt: null,
     events: [],
@@ -35,6 +36,7 @@ function applyEvent(state, event) {
       text = 'Copilot transcript connected'
       break
     case 'user.message':
+      state.requestStartedAt = at
       if (typeof data.content === 'string')
         state.task = data.content.replace(/\s+/g, ' ').trim().slice(0, 180) || state.task
       state.pendingTools.clear()
@@ -44,6 +46,7 @@ function applyEvent(state, event) {
       text = 'User message received'
       break
     case 'assistant.turn_start':
+      state.requestStartedAt ??= at
       state.finalResponse = false
       state.finishedAt = null
       state.status = 'running'
@@ -197,6 +200,9 @@ function toSession(state, now = Date.now(), chat = {}) {
               ? 'No readable lifecycle state yet. Session history may still be loading.'
               : 'Inferred from local Copilot transcript events; permission prompts may not be reported.',
     startedAt: state.startedAt,
+    requestStartedAt: Number.isFinite(request?.timestamp)
+      ? request.timestamp
+      : (state.requestStartedAt ?? state.startedAt),
     updatedAt,
     finishedAt: savedComplete ? completedAt : newRequest ? null : state.finishedAt,
     files: 0,
@@ -458,7 +464,8 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
         ) {
           session.status = 'unknown'
           session.finishedAt = null
-          session.statusDetail = 'Session history is still being read; the next update will continue.'
+          session.statusDetail =
+            'Session history is still being read; the next update will continue.'
         }
         sessions.push(session)
         targets.set(session.id, {

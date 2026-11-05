@@ -9,6 +9,7 @@ import {
   idleTime,
   parseSessions,
   serializeSessions,
+  sessionDuration,
 } from './sessions.ts'
 
 const now = 1800000000000
@@ -42,6 +43,8 @@ test('waiting is not completed until execution resumes', () => {
 test('live sessions cannot be mutated by demo controls and unknown needs attention', () => {
   const sessions = createDemoSessions(now)
   sessions[0].source = 'vscode'
+  assert.equal(changeStatus(sessions, '014', 'completed', now), sessions)
+  sessions[0].source = 'claude'
   assert.equal(changeStatus(sessions, '014', 'completed', now), sessions)
   sessions[0].status = 'unknown'
   assert.ok(
@@ -89,4 +92,16 @@ test('idle duration grows even after completion and resets on new activity', () 
   assert.equal(elapsed(session, now + 65000), elapsed(session, now))
   assert.equal(idleTime({ ...session, updatedAt: now + 65000 }, now + 66000), '00:01')
   assert.equal(idleTime(session, now - 1000), '00:00')
+})
+
+test('running sessions show current request duration while idle is not running', () => {
+  const session = {
+    ...createDemoSessions(now)[0],
+    source: 'claude' as const,
+    requestStartedAt: now - 65000,
+  }
+  assert.equal(sessionDuration(session, now), '01:05')
+  assert.equal(sessionDuration({ ...session, status: 'idle' }, now), 'Idle')
+  assert.equal(filterSessions([{ ...session, status: 'idle' }], '', 'running', 'all').length, 0)
+  assert.equal(sessionDuration({ ...session, source: 'vscode' }, now), '01:05')
 })
