@@ -15,8 +15,7 @@ const { pathToFileURL } = require('node:url')
 const { createVSCodeSource } = require('./vscode-sessions.cjs')
 const { createClaudeSource } = require('./claude-sessions.cjs')
 const { createLiveSources } = require('./live-sources.cjs')
-const { openSession } = require('../vscode-companion/bridge.cjs')
-const { createAlertTracker, sessionReference, matchesReference } = require('./session-alerts.cjs')
+const { createAlertTracker, matchesReference } = require('./session-alerts.cjs')
 const { createAlertHistory } = require('./alert-history.cjs')
 const fs = require('node:fs')
 
@@ -26,6 +25,11 @@ const packagedApp = app.isPackaged && !process.defaultApp
 const iconRoot = packagedApp ? path.join(process.resourcesPath, 'icons') : path.join(root, 'public')
 const iconPath = path.join(iconRoot, process.platform === 'win32' ? 'pulse.ico' : 'pulse.png')
 const testMode = process.env.PULSE_TEST_MODE === '1'
+const applicationId = testMode
+  ? 'dev.pulse.agent-monitor.test'
+  : packagedApp
+    ? 'dev.pulse.agent-monitor'
+    : 'dev.pulse.agent-monitor.development'
 const devUrl = process.env.PULSE_DEV_SERVER_URL
 const windows = new Set()
 let mainWindow
@@ -38,6 +42,8 @@ let popupSequence = 0
 let popupIds = []
 let popupRevealPending = false
 let systemNotifications = false
+let popupDurationMs = 5000
+const popupDurations = new Set([0, 5000, 10000, 30000])
 const alertTracker = createAlertTracker()
 let alertHistory
 const nativeNotifications = new Set()
@@ -52,7 +58,6 @@ const vscodeSource = createVSCodeSource(
     (testMode
       ? path.join(process.env.PULSE_TEST_DATA || app.getPath('temp'), 'no-vscode-storage')
       : path.join(app.getPath('appData'), 'Code', 'User', 'workspaceStorage')),
-  process.env.PULSE_VSCODE_SCHEME,
 )
 const claudeSource = createClaudeSource(
   testMode
@@ -88,6 +93,7 @@ function publishFeed(next, updatedSource) {
   if (updatedSource) initializedSources.add(updatedSource)
   feed = {
     ...next,
+    sources: liveSources.view('live').sources,
     sessions: next.sessions.map((item) => ({ ...item, archivedAt: archivedSessions.get(item.id) })),
     revision: feed.revision + 1,
   }
@@ -123,6 +129,7 @@ function alertState() {
     items: pendingAlerts,
     revision: alertRevision,
     systemNotifications,
+    popupDurationMs,
     storageWarning: alertHistory?.warning ?? null,
     popup: { sequence: popupSequence, ids: popupIds },
   }
@@ -220,7 +227,7 @@ async function refreshFeed(force = false) {
 }
 
 app.setName('Pulse')
-app.setAppUserModelId('dev.pulse.agent-monitor')
+app.setAppUserModelId(applicationId)
 if (testMode && process.env.PULSE_TEST_DATA) app.setPath('userData', process.env.PULSE_TEST_DATA)
 if (devUrl) {
   const parsed = new URL(devUrl)
@@ -242,8 +249,8 @@ function secureWindow(window) {
   windows.add(window)
   if (process.platform === 'win32')
     window.setAppDetails({
-      appId: 'dev.pulse.agent-monitor',
-      appIconPath: process.execPath,
+      appId: applicationId,
+      appIconPath: iconPath,
       appIconIndex: 0,
       relaunchDisplayName: 'Agent Pulse',
       relaunchCommand: packagedApp ? `"${process.execPath}"` : `"${process.execPath}" "${root}"`,
@@ -471,17 +478,28 @@ ipcMain.handle('pulse:ready-alert-popup', (event, sequence) => {
   if (trustedWindow(event) !== alertWindow) throw new Error('Invalid popup window.')
   revealAlertWindow(sequence)
 })
+function saveNotificationSettings(enabled, duration) {
+  fs.mkdirSync(app.getPath('userData'), { recursive: true })
+  const filename = path.join(app.getPath('userData'), 'notification-settings.json')
+  fs.writeFileSync(
+    `${filename}.tmp`,
+    JSON.stringify({ version: 2, systemNotifications: enabled, popupDurationMs: duration }),
+  )
+  fs.renameSync(`${filename}.tmp`, filename)
+  systemNotifications = enabled
+  popupDurationMs = duration
+  publishAlerts()
+  return alertState()
+}
 ipcMain.handle('pulse:set-system-notifications', (event, enabled) => {
   trustedWindow(event)
   if (typeof enabled !== 'boolean') throw new TypeError('Invalid notification setting.')
-  fs.mkdirSync(app.getPath('userData'), { recursive: true })
-  fs.writeFileSync(
-    path.join(app.getPath('userData'), 'notification-settings.json'),
-    JSON.stringify({ version: 2, systemNotifications: enabled }),
-  )
-  systemNotifications = enabled
-  publishAlerts()
-  return alertState()
+  return saveNotificationSettings(enabled, popupDurationMs)
+})
+ipcMain.handle('pulse:set-popup-duration', (event, duration) => {
+  trustedWindow(event)
+  if (!popupDurations.has(duration)) throw new TypeError('Invalid popup duration.')
+  return saveNotificationSettings(systemNotifications, duration)
 })
 ipcMain.handle('pulse:get-session-feed', (event) => {
   trustedWindow(event)
@@ -521,7 +539,7 @@ ipcMain.handle('pulse:refresh-sessions', (event) => {
   trustedWindow(event)
   return refreshFeed(true)
 })
-async function openVSCodeSession(id, expected) {
+async function openSessionDetails(id, expected) {
   if (typeof id !== 'string' || !liveSources.sessions().some((item) => item.id === id))
     throw new TypeError('Unknown session.')
   const openedSnapshot = liveSources.sessions().find((item) => item.id === id)
@@ -533,55 +551,14 @@ async function openVSCodeSession(id, expected) {
   )
     return {
       mode: 'stale',
-      verified: false,
       message: 'This request has changed. Select the current session or reminder and try again.',
     }
-  if (openedSnapshot.source === 'claude')
-    return {
-      mode: 'unavailable',
-      verified: false,
-      code: 'terminal-navigation-unavailable',
-      message:
-        'Continue in your existing Claude Code terminal. Pulse cannot locate its original terminal tab yet; no new session was started.',
-    }
-  const target = vscodeSource.sessionTarget(id)
-  if (!target) throw new Error('The workspace is no longer available.')
-  const reference = sessionReference(openedSnapshot)
-  const pendingIds = new Set(
-    pendingAlerts
-      .filter(
-        (alert) =>
-          alert.sessionId === id &&
-          (!expected?.alertId || alert.id === expected.alertId) &&
-          matchesReference({ ...alert.reference, id: alert.sessionId }, reference),
-      )
-      .map((alert) => alert.id),
-  )
-  try {
-    const opened = await openSession(target.workspacePath, target.scheme, target.sessionId)
-    const current = liveSources.sessions().find((item) => item.id === id)
-    if (opened.verified && matchesReference(current, reference)) {
-      pendingAlerts = pendingAlerts.filter((alert) => !pendingIds.has(alert.id))
-      publishAlerts()
-      for (const window of windows) window.webContents.send('pulse:session-opened', reference)
-    }
-    return opened
-  } catch (error) {
-    return {
-      mode: 'unavailable',
-      verified: false,
-      code: error.code ?? 'connection-failed',
-      message: `${error.message || 'The VS Code request failed.'} No new window was opened.`,
-    }
-  }
+  showMain(id)
+  return { mode: 'pulse-details' }
 }
-ipcMain.handle('pulse:open-vscode', async (event, id, reference) => {
-  trustedWindow(event)
-  return openVSCodeSession(id, reference)
-})
 ipcMain.handle('pulse:open-session', async (event, id, reference) => {
   trustedWindow(event)
-  return openVSCodeSession(id, reference)
+  return openSessionDetails(id, reference)
 })
 ipcMain.handle('pulse:set-pinned', (event, pinned) => {
   if (typeof pinned !== 'boolean') throw new TypeError('Expected a boolean.')
@@ -593,9 +570,9 @@ ipcMain.handle('pulse:open-mini', (event) => {
   trustedWindow(event)
   showMini()
 })
-ipcMain.handle('pulse:hide-mini', (event) => {
+ipcMain.handle('pulse:minimize-mini', (event) => {
   const window = trustedWindow(event)
-  if (window === miniWindow) window.hide()
+  if (window === miniWindow) window.minimize()
 })
 ipcMain.handle('pulse:get-mini-state', (event) => {
   trustedWindow(event)
@@ -639,9 +616,9 @@ function showSystemNotification(payload) {
       : undefined
   notification.on('click', () => {
     if (sessionId)
-      void openVSCodeSession(sessionId, payload.reference)
+      void openSessionDetails(sessionId, payload.reference)
         .then((result) => {
-          if (!result.verified) showMain(sessionId)
+          if (result.mode === 'stale') showAlertInbox()
         })
         .catch(() => showMain(sessionId))
     else showMain()
@@ -713,6 +690,8 @@ else {
         fs.readFileSync(path.join(app.getPath('userData'), 'notification-settings.json'), 'utf8'),
       )
       systemNotifications = saved.version === 2 && saved.systemNotifications === true
+      if (saved.version === 2 && popupDurations.has(saved.popupDurationMs))
+        popupDurationMs = saved.popupDurationMs
     } catch {}
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) =>
       callback(false),

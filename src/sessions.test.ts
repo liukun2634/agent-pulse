@@ -10,6 +10,7 @@ import {
   parseSessions,
   serializeSessions,
   sessionDuration,
+  sessionHostLabel,
 } from './sessions.ts'
 
 const now = 1800000000000
@@ -104,4 +105,13 @@ test('running sessions show current request duration while idle is not running',
   assert.equal(sessionDuration({ ...session, status: 'idle' }, now), 'Idle')
   assert.equal(filterSessions([{ ...session, status: 'idle' }], '', 'running', 'all').length, 0)
   assert.equal(sessionDuration({ ...session, source: 'vscode' }, now), '01:05')
+})
+
+test('agent identity does not guess the live window type', () => {
+  const demo = createDemoSessions(now)[0]
+  assert.equal(sessionHostLabel(demo), 'Terminal')
+  const live = { ...demo, source: 'claude' as const }
+  assert.equal(sessionHostLabel(live), 'Not identified')
+  assert.equal(sessionHostLabel({ ...live, host: 'vscode' }), 'VS Code')
+  assert.equal(sessionHostLabel({ ...live, host: 'desktop' }), 'Desktop')
 })

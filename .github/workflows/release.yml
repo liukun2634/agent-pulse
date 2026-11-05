@@ -35,8 +35,7 @@ jobs:
         run: |
           $installers = @(Get-ChildItem release/Agent-Pulse-Setup-*-x64.exe)
           if ($installers.Count -ne 1) { throw 'Expected exactly one Windows installer.' }
-          Copy-Item .artifacts/pulse-companion.vsix release/pulse-companion.vsix
-          $files = @($installers[0], (Get-Item release/pulse-companion.vsix))
+          $files = @($installers[0])
           $checksums = foreach ($file in $files) {
             "$((Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($file.Name)"
           }
@@ -48,7 +47,6 @@ jobs:
           retention-days: 14
           path: |
             release/Agent-Pulse-Setup-*-x64.exe
-            release/pulse-companion.vsix
             release/SHA256SUMS.txt
 
   publish:

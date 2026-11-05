@@ -17,6 +17,7 @@ const {
   sessionReference,
   matchesReference,
 } = require('../electron/session-alerts.cjs')
+const { createLiveSources } = require('../electron/live-sources.cjs')
 
 const now = Date.parse('2026-11-03T10:00:00Z')
 test('reminder history restores pending items without re-alerting dismissed input', async () => {
@@ -234,13 +235,13 @@ test('source discovers workspaces, tails partial UTF-8 lines and handles truncat
     assert.equal(snapshot.state, 'connected')
     assert.equal(snapshot.sessions[0].project, 'Project name')
     assert.equal(snapshot.sessions[0].status, 'running')
-    assert.match(source.workspaceUri(snapshot.sessions[0].id), /^vscode:\/\/file\//)
-    assert.equal(source.workspaceUri('untrusted'), undefined)
 
     const message = Buffer.from(event('user.message', { content: '\u4f60\u597d' }))
     const split = message.indexOf(Buffer.from('\u4f60')) + 1
     await fs.appendFile(filename, message.subarray(0, split))
-    assert.equal((await scan()).sessions[0].status, 'unknown')
+    const partial = await scan()
+    assert.equal(partial.sessions[0].status, 'unknown')
+    assert.equal(partial.needsRefresh, false)
     await fs.appendFile(filename, message.subarray(split))
     snapshot = await scan()
     assert.equal(snapshot.sessions[0].task, '\u4f60\u597d')
@@ -259,9 +260,116 @@ test('source discovers workspaces, tails partial UTF-8 lines and handles truncat
     assert.equal((await scan()).sessions[0].status, 'failed')
     await fs.unlink(filename)
     assert.equal((await scan()).state, 'empty')
-    assert.equal(source.workspaceUri(snapshot.sessions[0].id), undefined)
   } finally {
     source.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('written completion is published through file events without a polling tick', async () => {
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'pulse-event-wake-'))
+  const workspace = path.join(root, 'workspace-one')
+  const transcripts = path.join(workspace, 'GitHub.copilot-chat', 'transcripts')
+  const watchers = new Map()
+  const source = createVSCodeSource(root, {
+    watchChanges: (directory, _options, listener) => {
+      watchers.set(directory, listener)
+      return { on() {}, close() {} }
+    },
+  })
+  let completed
+  const observed = new Promise((resolve) => {
+    completed = resolve
+  })
+  const sources = createLiveSources({ vscode: source }, () => {
+    const snapshot = sources.view('live').sessions[0]
+    if (snapshot?.status === 'completed') completed(snapshot)
+  })
+  try {
+    await fs.mkdir(transcripts, { recursive: true })
+    await fs.writeFile(
+      path.join(workspace, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL(root).href }),
+    )
+    const filename = path.join(transcripts, 'session-one.jsonl')
+    const encode = (type, data = {}) =>
+      JSON.stringify({ type, data, timestamp: new Date().toISOString() }) + '\n'
+    await fs.writeFile(filename, encode('user.message', { content: 'Synthetic latency check' }))
+    await sources.refresh()
+    assert.equal(sources.view('live').sessions[0].status, 'running')
+    await fs.appendFile(
+      filename,
+      encode('assistant.message', { content: 'Finished' }) + encode('assistant.turn_end'),
+    )
+    watchers.get(transcripts)('change', 'session-one.jsonl')
+    const session = await observed
+    assert.equal(session.status, 'completed')
+    assert.equal(session.host, 'vscode')
+  } finally {
+    sources.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('large saved chat history drains in bounded passes without waiting for polling', async () => {
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'pulse-backlog-'))
+  const workspace = path.join(root, 'workspace-one')
+  const transcripts = path.join(workspace, 'GitHub.copilot-chat', 'transcripts')
+  const chats = path.join(workspace, 'chatSessions')
+  const source = createVSCodeSource(root, {
+    watchChanges: () => {
+      throw new Error('No watcher')
+    },
+  })
+  const states = []
+  let finished
+  const drained = new Promise((resolve) => {
+    finished = resolve
+  })
+  const sources = createLiveSources({ vscode: source }, () => {
+    const snapshot = sources.view('live').sessions[0]
+    states.push(snapshot.status)
+    if (snapshot.status === 'completed') finished()
+  })
+  try {
+    await fs.mkdir(transcripts, { recursive: true })
+    await fs.mkdir(chats, { recursive: true })
+    await fs.writeFile(
+      path.join(workspace, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL(root).href }),
+    )
+    const timestamp = Date.now()
+    await fs.writeFile(
+      path.join(transcripts, 'session-one.jsonl'),
+      JSON.stringify({
+        type: 'user.message',
+        timestamp: new Date(timestamp).toISOString(),
+        data: { content: 'Synthetic large history' },
+      }) + '\n',
+    )
+    await fs.writeFile(
+      path.join(chats, 'session-one.jsonl'),
+      JSON.stringify({
+        kind: 0,
+        v: {
+          requests: [
+            {
+              requestId: 'request-one',
+              timestamp,
+              modelState: { value: 1, completedAt: timestamp + 1 },
+            },
+          ],
+          padding: 'x'.repeat(9 * 1024 * 1024),
+        },
+      }) + '\n',
+    )
+    await sources.refresh()
+    assert.equal(sources.view('vscode').needsRefresh, true)
+    await drained
+    assert.deepEqual(states, ['unknown', 'completed'])
+    assert.equal(sources.view('vscode').needsRefresh, false)
+  } finally {
+    sources.close()
     await fs.rm(root, { recursive: true, force: true })
   }
 })
@@ -305,7 +413,7 @@ test('finished sessions back off while unfinished requests stay on two-second po
   const root = await fs.mkdtemp(path.join(tmpdir(), 'pulse-idle-'))
   let wake
   let closed = false
-  const source = createVSCodeSource(root, 'vscode', {
+  const source = createVSCodeSource(root, {
     watchChanges: (_root, _options, listener) => {
       wake = listener
       return {

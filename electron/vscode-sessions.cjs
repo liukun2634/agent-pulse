@@ -1,7 +1,7 @@
 const fs = require('node:fs/promises')
 const { watch } = require('node:fs')
 const path = require('node:path')
-const { fileURLToPath, pathToFileURL } = require('node:url')
+const { fileURLToPath } = require('node:url')
 
 const STALE_AFTER = 2 * 60 * 1000
 const INPUT_TOOLS = new Set(['vscode_askQuestions', 'ask_user', 'ask_questions'])
@@ -182,6 +182,7 @@ function toSession(state, now = Date.now(), chat = {}) {
     branch: 'Not reported',
     provider: 'copilot',
     source: 'vscode',
+    host: 'vscode',
     requestId: request?.requestId,
     status,
     statusDetail: savedComplete
@@ -261,15 +262,16 @@ async function readChatState(filename, cursor) {
     }
   }
   cursor.mtimeMs = stat.mtimeMs
+  cursor.hasBacklog = cursor.offset < stat.size
   cursor.complete = cursor.offset === stat.size && cursor.remainder.length === 0
   return cursor
 }
 
-function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = watch } = {}) {
+function createVSCodeSource(storagePath, { watchChanges = watch } = {}) {
   const cache = new Map()
   const watchers = new Map()
   const dirtyFiles = new Set()
-  let targets = new Map()
+  const changeListeners = new Set()
 
   function close() {
     for (const watcher of watchers.values()) watcher.close()
@@ -288,6 +290,7 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
             if (cached.titleFile && path.dirname(cached.titleFile) === transcriptRoot)
               dirtyFiles.add(cached.titleFile)
           }
+        for (const listener of changeListeners) listener()
       })
       watcher.on('error', () => {
         watcher.close()
@@ -304,7 +307,6 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
     try {
       directories = await fs.readdir(storagePath, { withFileTypes: true })
     } catch (error) {
-      targets.clear()
       cache.clear()
       close()
       return {
@@ -340,7 +342,14 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
           const cached = cache.get(filename)
           const dirty = dirtyFiles.delete(filename)
           const chatDirty = dirtyFiles.delete(titleFile)
-          const check = force || dirty || chatDirty || !cached || now >= cached.nextCheckAt
+          const check =
+            force ||
+            dirty ||
+            chatDirty ||
+            !cached ||
+            now >= cached.nextCheckAt ||
+            cached.offset < cached.stat?.size ||
+            cached.chat?.hasBacklog === true
           const stat = check ? await fs.stat(filename) : cached.stat
           candidates.push({
             filename,
@@ -373,7 +382,7 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
     const keep = new Set(selected.map((candidate) => candidate.filename))
     for (const key of cache.keys()) if (!keep.has(key)) cache.delete(key)
     const sessions = []
-    targets = new Map()
+    let needsRefresh = false
 
     for (const candidate of selected) {
       try {
@@ -456,6 +465,7 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
                   session?.status,
                 ))
         }
+        if (cached.offset < candidate.stat.size || cached.chat?.hasBacklog) needsRefresh = true
         if (!session) continue
         if (
           cached.offset < candidate.stat.size ||
@@ -468,12 +478,6 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
             'Session history is still being read; the next update will continue.'
         }
         sessions.push(session)
-        targets.set(session.id, {
-          uri: `${scheme === 'vscode-insiders' ? scheme : 'vscode'}://file${pathToFileURL(candidate.workspacePath).pathname}`,
-          workspacePath: candidate.workspacePath,
-          scheme: scheme === 'vscode-insiders' ? scheme : 'vscode',
-          sessionId: path.basename(candidate.filename, '.jsonl'),
-        })
       } catch {
         failures++
         cache.delete(candidate.filename)
@@ -483,6 +487,7 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
     return {
       source: 'vscode',
       state: failures ? 'error' : sessions.length ? 'connected' : 'empty',
+      needsRefresh,
       message: failures
         ? 'Some transcripts could not be read; available sessions are shown.'
         : sessions.length
@@ -496,8 +501,10 @@ function createVSCodeSource(storagePath, scheme = 'vscode', { watchChanges = wat
   return {
     scan,
     close,
-    workspaceUri: (id) => targets.get(id)?.uri,
-    sessionTarget: (id) => targets.get(id),
+    subscribe(listener) {
+      changeListeners.add(listener)
+      return () => changeListeners.delete(listener)
+    },
   }
 }
 

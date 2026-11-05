@@ -1,6 +1,6 @@
 # Agent Pulse
 
-Keep your agent sessions in view. Know when input is needed or a reply is ready, then return to the right conversation.
+Keep your agent sessions in view. Know when input is needed or a reply is ready, and inspect recent activity in one local monitor.
 
 [Website](https://liukun2634.github.io/agent-pulse/) | [Download for Windows](https://liukun2634.github.io/agent-pulse/download.html) | [Releases](https://github.com/liukun2634/agent-pulse/releases) | [Report an issue](https://github.com/liukun2634/agent-pulse/issues)
 
@@ -26,7 +26,7 @@ Screenshots use Demo data. Claude Code snapshot monitoring is available; Codex i
 - **See what needs attention.** Follow running sessions, input requests and ready replies at a glance, with active sessions checked every two seconds.
 - **Keep progress in view.** Pin the mini monitor, dock it on either screen edge or collapse it into a narrow rail.
 - **Stay focused.** Brief notifications let you know when to act without taking keyboard focus. Revisit pending reminders from the bell inbox.
-- **Pick up the conversation.** Jump to the matching chat in your existing VS Code window with Pulse Companion.
+- **Inspect recent activity.** Open a session's details and timeline directly in Pulse from the mini monitor or a reminder.
 - **Organize your sessions.** Search, filter, inspect activity, and archive or restore sessions without interrupting the agent.
 - **Keep your data local.** No account, telemetry or model API key required. Your conversations stay on your device.
 
@@ -35,16 +35,14 @@ Screenshots use Demo data. Claude Code snapshot monitoring is available; Codex i
 Visit the **[Windows download page](https://liukun2634.github.io/agent-pulse/download.html)** for available builds and installation instructions. Release files are hosted on [GitHub Releases](https://github.com/liukun2634/agent-pulse/releases). If no installer is available yet, [try it from source](#development).
 
 1. Install Agent Pulse on Windows. Packaged releases do not require Node.js.
-2. For Copilot navigation, install Pulse Companion in VS Code using **Extensions: Install from VSIX**. Claude Code monitoring uses your separately installed Claude CLI, not this extension.
+2. Use your existing VS Code / GitHub Copilot setup or a separately installed Claude Code CLI. Pulse monitoring requires no additional editor extension.
 3. Launch Pulse and select **Live** to see VS Code and Claude Code sessions together. Use the Agent filter to narrow the list, or **Mini monitor** to follow progress. **Demo** stays separate; switching views does not stop live monitoring.
-
-Companion setup details: [vscode-companion/README.md](vscode-companion/README.md).
 
 > Preview builds are unsigned and may trigger Windows security warnings. Verify the download source and checksums; do not disable system security protections.
 
 ## Project status
 
-Agent Pulse is actively evolving. Claude Code currently supports session snapshots and observed input/error states; exact per-turn events and original-terminal navigation are still in development. Idle is not treated as a finished reply, and Claude runtime starts when Pulse observes execution. The browser preview uses sample data only.
+Agent Pulse is actively evolving, with monitoring as the current focus. Session actions open Pulse details, not external editor or terminal windows. Claude Code supports session snapshots and observed input/error states; exact per-turn events are still in development. Idle is not treated as a finished reply, and Claude runtime starts when Pulse observes execution. The browser preview uses sample data only.
 
 Keep Pulse running, including in the tray, to receive reminders. Provider formats may vary between versions. Pulse observes sessions without sending messages, approving permissions or installing hooks on your behalf.
 

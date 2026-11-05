@@ -11,6 +11,7 @@ import {
   CheckCheck,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleCheck,
   CircleDot,
   CirclePause,
@@ -57,11 +58,11 @@ import {
   idleTime,
   parseSessions,
   providers,
-  referenceForSession,
   replyMarker,
   relativeTime,
   serializeSessions,
   sessionDuration,
+  sessionHostLabel,
   statusLabels,
 } from './sessions'
 import type { Provider, Session, SessionFilter, SessionStatus } from './sessions'
@@ -304,12 +305,73 @@ function SessionCard({
           {sessionDuration(session, now)}
         </span>
       </div>
+      <span className="session-entry">Entry: {sessionHostLabel(session)}</span>
       {session.source && (
         <p className="session-progress" title={session.events.at(-1)?.text}>
           {session.events.at(-1)?.text}
         </p>
       )}
     </button>
+  )
+}
+
+function SessionTimeline({ session }: { session: Session }) {
+  const [expanded, setExpanded] = useState(false)
+  const previewLimit = 5
+  const events = expanded ? session.events : session.events.slice(-previewLimit)
+  const hasMore = session.events.length > previewLimit
+
+  return (
+    <>
+      <div className="timeline-heading">
+        <h3>Timeline</h3>
+        <span>
+          {hasMore && !expanded
+            ? `${events.length} of ${session.events.length}`
+            : session.events.length}{' '}
+          events
+        </span>
+      </div>
+      <ol className="timeline" id="session-timeline" aria-label="Session events">
+        {events.map((event, index) => (
+          <li key={event.id} className={`event-${event.kind}`}>
+            <span className="timeline-marker">
+              {index === events.length - 1 && session.status === 'running' ? (
+                <span className="timeline-live" />
+              ) : event.kind === 'error' ? (
+                <X size={9} />
+              ) : event.kind === 'warning' ? (
+                <Minus size={9} />
+              ) : (
+                <Check size={9} />
+              )}
+            </span>
+            <div>
+              <p>{event.text}</p>
+              <time>
+                {new Date(event.at).toLocaleTimeString('en-GB', {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                })}
+              </time>
+            </div>
+          </li>
+        ))}
+      </ol>
+      {hasMore && (
+        <button
+          type="button"
+          className="text-button timeline-toggle"
+          aria-expanded={expanded}
+          aria-controls="session-timeline"
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? 'Show less' : 'Read more'}
+          {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </button>
+      )}
+    </>
   )
 }
 
@@ -336,6 +398,7 @@ function Workspace() {
   const [toast, setToast] = useState<Toast | null>(null)
   const [openingAlertId, setOpeningAlertId] = useState<string | null>(null)
   const [alertError, setAlertError] = useState<{ id: string; text: string } | null>(null)
+  const [popupSettingError, setPopupSettingError] = useState<string | null>(null)
   const [pinned, setPinned] = useState(false)
   const [miniState, setMiniState] = useState<PulseMiniState>({ collapsed: false, edge: 'right' })
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -411,27 +474,6 @@ function Workspace() {
     }
   }, [])
 
-  const markOpened = useEffectEvent((reference: PulseSessionReference) => {
-    const session = sessions.find((item) => item.id === reference.sessionId)
-    if (!session && reference.status === 'completed') {
-      setSeenReplies((current) => ({
-        ...current,
-        [reference.sessionId]: replyMarker({
-          ...reference,
-          requestId: reference.requestId ?? undefined,
-        }),
-      }))
-      return
-    }
-    if (
-      session?.status === 'completed' &&
-      (session.requestId ?? null) === reference.requestId &&
-      session.finishedAt === reference.finishedAt
-    )
-      setSeenReplies((current) => ({ ...current, [session.id]: replyMarker(session) }))
-  })
-
-  useEffect(() => desktop?.onSessionOpened(markOpened), [])
   useEffect(() => desktop?.onOpenAlertInbox?.(() => setModal('notifications')), [])
 
   useEffect(() => {
@@ -504,54 +546,21 @@ function Workspace() {
     }
   }
 
-  async function openVSCode(id: string) {
-    try {
-      const session = sessions.find((item) => item.id === id)
-      if (!session) return
-      const result = await (desktop?.openSession ?? desktop?.openVSCode)?.(
-        id,
-        referenceForSession(session),
-      )
-      if (result?.message)
-        setToast({
-          title:
-            result.mode === 'unavailable'
-              ? result.code === 'terminal-navigation-unavailable'
-                ? 'Continue in Claude Code'
-                : result.code === 'session-not-found' || result.code === 'session-unreadable'
-                  ? 'Session unavailable'
-                  : result.code === 'navigation-failed'
-                    ? 'VS Code navigation failed'
-                    : 'VS Code connection unavailable'
-              : result.mode === 'stale'
-                ? 'Session changed'
-                : 'Chat opened in an editor',
-          detail: result.message ?? 'Pulse Companion is not connected.',
-          tone: 'info',
-        })
-    } catch {
-      setToast({
-        title: 'Session could not be opened',
-        detail: 'Return to the original application or check its connection.',
-        tone: 'info',
-      })
-    }
-  }
-
   async function openPendingAlert(alert: PulseAlert) {
     if (!desktop || openingAlertId) return
     setOpeningAlertId(alert.id)
     setAlertError(null)
     try {
-      const result = await (desktop.openSession ?? desktop.openVSCode)(alert.sessionId, {
+      const result = await desktop.openSession(alert.sessionId, {
         ...alert.reference,
         alertId: alert.id,
       })
-      if (!result.verified || result.message)
+      if (result.mode === 'stale')
         setAlertError({
           id: alert.id,
           text: result.message ?? 'The session could not be verified.',
         })
+      else setModal(null)
     } catch {
       setAlertError({
         id: alert.id,
@@ -567,6 +576,16 @@ function Workspace() {
       await desktop?.dismissAlert(id)
     } catch {
       setAlertError({ id, text: 'The reminder could not be dismissed. Please try again.' })
+    }
+  }
+
+  async function changePopupDuration(duration: number) {
+    if (!desktop?.setPopupDuration) return
+    setPopupSettingError(null)
+    try {
+      await desktop.setPopupDuration(duration)
+    } catch {
+      setPopupSettingError('Could not save popup duration. Please try again.')
     }
   }
 
@@ -797,6 +816,7 @@ function Workspace() {
       desktop?.onSelectSession((id) => {
         setSelectedId(id)
         setView('sessions')
+        setModal(null)
       }),
     [],
   )
@@ -898,10 +918,10 @@ function Workspace() {
       </div>
       {toast.sessionId && (
         <IconButton
-          label={live ? 'Open reply' : 'View completed session'}
+          label={live ? 'View session details' : 'View completed session'}
           onClick={() => {
             if (live) {
-              void openVSCode(toast.sessionId!)
+              openWorkspace(toast.sessionId!)
               setToast(null)
               return
             }
@@ -945,11 +965,9 @@ function Workspace() {
               <button
                 key={item.id}
                 className={`rail-session mini-${item.status}`}
-                title={`${item.project}\n${item.task}\n${statusLabels[item.status]}`}
+                title={`${item.project}\n${item.task}\n${sessionHostLabel(item)}\n${statusLabels[item.status]}`}
                 aria-label={`Open ${item.project}: ${item.task}`}
-                onClick={() =>
-                  item.source === 'vscode' ? void openVSCode(item.id) : openWorkspace(item.id)
-                }
+                onClick={() => openWorkspace(item.id)}
               >
                 <ProviderIcon provider={item.provider} size={18} />
                 <span className={`rail-status rail-status-${item.status}`} />
@@ -1034,7 +1052,7 @@ function Workspace() {
               <Maximize2 size={15} />
             </IconButton>
             {desktop && (
-              <IconButton label="Hide mini monitor" onClick={() => void desktop.hideMini()}>
+              <IconButton label="Minimize mini monitor" onClick={() => void desktop.minimizeMini()}>
                 <Minus size={16} />
               </IconButton>
             )}
@@ -1064,12 +1082,8 @@ function Workspace() {
               <button
                 key={session.id}
                 className={`mini-session mini-${session.status}`}
-                title={`${session.project}\n${session.task}${session.source === 'claude' ? '\nView session in Pulse' : ''}`}
-                onClick={() =>
-                  session.source === 'vscode'
-                    ? void openVSCode(session.id)
-                    : openWorkspace(session.id)
-                }
+                title={`${session.project}\n${session.task}\n${sessionHostLabel(session)}\nView session in Pulse`}
+                onClick={() => openWorkspace(session.id)}
               >
                 <span className="mini-provider">
                   <ProviderIcon provider={session.provider} size={20} />
@@ -1546,7 +1560,7 @@ function Workspace() {
                     <div>
                       <strong>{providers[selected.provider].name}</strong>
                       <span title={selected.id}>
-                        {providers[selected.provider].surface}
+                        {sessionHostLabel(selected)}
                         <span className="separator">/</span>#
                         {selected.id.split(':').at(-1)?.slice(0, 8)}
                       </span>
@@ -1637,37 +1651,7 @@ function Workspace() {
                       </div>
                     </div>
                   )}
-                  <div className="timeline-heading">
-                    <h3>Timeline</h3>
-                    <span>{selected.events.length} events</span>
-                  </div>
-                  <ol className="timeline">
-                    {selected.events.map((event, index) => (
-                      <li key={event.id} className={`event-${event.kind}`}>
-                        <span className="timeline-marker">
-                          {index === selected.events.length - 1 && selected.status === 'running' ? (
-                            <span className="timeline-live" />
-                          ) : event.kind === 'error' ? (
-                            <X size={9} />
-                          ) : event.kind === 'warning' ? (
-                            <Minus size={9} />
-                          ) : (
-                            <Check size={9} />
-                          )}
-                        </span>
-                        <div>
-                          <p>{event.text}</p>
-                          <time>
-                            {new Date(event.at).toLocaleTimeString('en-GB', {
-                              hour: '2-digit',
-                              minute: '2-digit',
-                              second: '2-digit',
-                            })}
-                          </time>
-                        </div>
-                      </li>
-                    ))}
-                  </ol>
+                  <SessionTimeline key={selected.id} session={selected} />
                   <div className="inspector-footer">
                     {live && (
                       <button
@@ -1679,32 +1663,6 @@ function Workspace() {
                         {selected.archivedAt ? 'Restore session' : 'Archive session'}
                       </button>
                     )}
-                    <button
-                      className="button button-secondary open-session-button"
-                      disabled={selected.source === 'claude'}
-                      title={
-                        selected.source === 'claude'
-                          ? 'Original terminal navigation is not connected yet. Continue in your existing Claude Code terminal.'
-                          : undefined
-                      }
-                      onClick={() =>
-                        live
-                          ? void openVSCode(selected.id)
-                          : setToast({
-                              title: 'Demo session',
-                              detail: 'No external agent window is connected.',
-                              tone: 'info',
-                            })
-                      }
-                    >
-                      <SquareTerminal size={15} />
-                      {live
-                        ? selected.source === 'claude'
-                          ? 'Continue in terminal'
-                          : 'Open in VS Code'
-                        : 'Open session'}
-                      <ArrowUpRight size={15} />
-                    </button>
                     {!live && selected.status === 'running' && (
                       <button
                         className="text-button"
@@ -1804,6 +1762,32 @@ function Workspace() {
             <>
               <div className="settings-group">
                 <div className="settings-group-label">NOTIFICATIONS</div>
+                <div className="setting-row popup-setting">
+                  <span className="setting-icon">
+                    <Clock3 size={18} />
+                  </span>
+                  <div>
+                    <strong>Popup duration</strong>
+                    <span>Desktop reminders</span>
+                  </div>
+                  <select
+                    className="setting-select"
+                    aria-label="Popup duration"
+                    value={alerts.popupDurationMs ?? 5000}
+                    disabled={!desktop?.setPopupDuration}
+                    onChange={(event) => void changePopupDuration(Number(event.target.value))}
+                  >
+                    <option value={5000}>5 seconds</option>
+                    <option value={10000}>10 seconds</option>
+                    <option value={30000}>30 seconds</option>
+                    <option value={0}>Until closed</option>
+                  </select>
+                </div>
+                {popupSettingError && (
+                  <p className="pending-alert-error" role="alert">
+                    {popupSettingError}
+                  </p>
+                )}
                 <div className="setting-row">
                   <span className="setting-icon">
                     <BellRing size={18} />
@@ -1875,13 +1859,57 @@ function Workspace() {
                   />
                 </div>
               </div>
+              {desktop && feed.sources && (
+                <section className="source-connections" aria-label="Source connections">
+                  <div className="source-connections-heading">
+                    <h3>Connections</h3>
+                    <IconButton label="Refresh sources" onClick={() => void refreshSessions()}>
+                      <RotateCcw size={14} />
+                    </IconButton>
+                  </div>
+                  {feed.sources.map((source) => (
+                    <div className="source-connection" key={source.id}>
+                      <strong>{source.name}</strong>
+                      <dl>
+                        <div>
+                          <dt>Collector</dt>
+                          <dd>{source.state}</dd>
+                        </div>
+                        <div>
+                          <dt>Method</dt>
+                          <dd>{source.acquisition}</dd>
+                        </div>
+                        <div>
+                          <dt>Last check</dt>
+                          <dd>
+                            {source.scannedAt === null ? '-' : relativeTime(source.scannedAt, now)}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Scan time</dt>
+                          <dd>{source.durationMs === null ? '-' : `${source.durationMs} ms`}</dd>
+                        </div>
+                      </dl>
+                      {['error', 'unavailable'].includes(source.state) && (
+                        <p role="status">{source.message}</p>
+                      )}
+                    </div>
+                  ))}
+                </section>
+              )}
               <div className="integration-status">
                 <Monitor size={18} />
                 <div>
                   <strong>
                     {live ? 'Live sessions' : desktop ? 'Desktop preview' : 'Browser preview'}
                   </strong>
-                  <span>{live ? feed.message : 'Demo data only. No agent adapter connected.'}</span>
+                  <span>
+                    {live
+                      ? feed.message
+                      : desktop
+                        ? 'Sample data; live collectors remain active.'
+                        : 'Demo data only. No agent adapter connected.'}
+                  </span>
                 </div>
                 <span className="demo-badge">LOCAL</span>
               </div>

@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
+import { createDemoSessions } from '../src/sessions'
 
 test.beforeEach(async ({ page }) => {
   await page.goto('/')
@@ -141,6 +142,89 @@ test('mini monitor synchronizes and returns to a selected session', async ({ pag
     .getByRole('button', { name: 'Open atlas-api: Add authentication middleware', exact: true })
     .click()
   await expect(page.locator('.inspector h2')).toHaveText('Add authentication middleware')
+})
+
+test('detail timeline previews recent events and expands without affecting other sessions', async ({
+  page,
+}) => {
+  const sessions = createDemoSessions()
+  sessions[0].events = Array.from({ length: 12 }, (_, index) => ({
+    id: `timeline-${index}`,
+    text: `Timeline event ${index + 1}`,
+    at: Date.now() - (12 - index) * 1000,
+    kind: 'info' as const,
+  }))
+  await page.addInitScript((data) => {
+    localStorage.setItem('pulse.demo.sessions.v1', JSON.stringify({ version: 1, sessions: data }))
+  }, sessions)
+  await page.reload()
+  await expect(page.locator('.timeline li')).toHaveCount(5)
+  await expect(page.locator('.timeline li').first()).toContainText('Timeline event 8')
+  await expect(page.locator('.timeline li').last()).toContainText('Timeline event 12')
+  await expect(page.locator('.timeline-live')).toHaveCount(1)
+  await expect(page.locator('.timeline-heading')).toContainText('5 of 12 events')
+  await page.getByRole('button', { name: 'Read more', exact: true }).click()
+  await expect(page.locator('.timeline li')).toHaveCount(12)
+  await expect(page.getByRole('button', { name: 'Show less', exact: true })).toHaveAttribute(
+    'aria-expanded',
+    'true',
+  )
+  await page.evaluate((data) => {
+    data[0].events.push({
+      id: 'timeline-new',
+      text: 'New timeline event',
+      at: Date.now(),
+      kind: 'info',
+    })
+    const value = JSON.stringify({ version: 1, sessions: data })
+    localStorage.setItem('pulse.demo.sessions.v1', value)
+    window.dispatchEvent(
+      new StorageEvent('storage', { key: 'pulse.demo.sessions.v1', newValue: value }),
+    )
+  }, sessions)
+  await expect(page.locator('.timeline li')).toHaveCount(13)
+  await expect(page.locator('.timeline li').last()).toContainText('New timeline event')
+  await page.getByRole('button', { name: 'Show less', exact: true }).click()
+  await expect(page.locator('.timeline li')).toHaveCount(5)
+  await page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('pulse.demo.sessions.v1')!)
+    saved.sessions[0].events.push({
+      id: 'timeline-collapsed-update',
+      text: 'Latest collapsed event',
+      at: Date.now(),
+      kind: 'info',
+    })
+    const value = JSON.stringify(saved)
+    localStorage.setItem('pulse.demo.sessions.v1', value)
+    window.dispatchEvent(
+      new StorageEvent('storage', { key: 'pulse.demo.sessions.v1', newValue: value }),
+    )
+  })
+  await expect(page.locator('.timeline li')).toHaveCount(5)
+  await expect(page.locator('.timeline li').last()).toContainText('Latest collapsed event')
+  await page.getByRole('button', { name: 'Read more', exact: true }).click()
+  await page
+    .getByRole('button', { name: 'atlas-api: Add authentication middleware', exact: true })
+    .click()
+  await expect(page.locator('.timeline li')).toHaveCount(4)
+  await expect(page.getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
+  await page
+    .getByRole('button', { name: 'pulse-desktop: Refining the session timeline', exact: true })
+    .click()
+  await expect(page.locator('.timeline li')).toHaveCount(5)
+  await expect(page.getByRole('button', { name: 'Read more', exact: true })).toHaveAttribute(
+    'aria-expanded',
+    'false',
+  )
+  mkdirSync('.artifacts', { recursive: true })
+  await page.screenshot({ path: '.artifacts/timeline-collapsed.png', animations: 'disabled' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.getByRole('button', { name: 'Read more', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Read more', exact: true }).click()
+  await expect(page.locator('.timeline li')).toHaveCount(14)
+  await page.getByRole('button', { name: 'Show less', exact: true }).click()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: '.artifacts/timeline-mobile.png', animations: 'disabled' })
 })
 
 test('activity and notifications navigate to the correct details', async ({ page }) => {

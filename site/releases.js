@@ -61,10 +61,6 @@ async function loadRelease() {
     )
     enableAsset('installer', installer)
     enableAsset(
-      'companion',
-      release.assets.find((asset) => asset.name === 'pulse-companion.vsix'),
-    )
-    enableAsset(
       'checksums',
       release.assets.find((asset) => asset.name === 'SHA256SUMS.txt'),
     )

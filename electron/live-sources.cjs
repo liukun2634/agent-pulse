@@ -12,11 +12,30 @@ function createLiveSources(adapters, onUpdate) {
     ]),
   )
   const pending = new Map()
+  const queued = new Set()
+  const wakeTimers = new Map()
   let closed = false
+
+  function wake(source) {
+    if (closed) return
+    if (pending.has(source)) {
+      queued.add(source)
+      return
+    }
+    if (wakeTimers.has(source)) return
+    wakeTimers.set(
+      source,
+      setTimeout(() => {
+        wakeTimers.delete(source)
+        void refreshSource(source, false)
+      }, 100),
+    )
+  }
 
   function refreshSource(source, force) {
     if (pending.has(source)) return pending.get(source)
     const operation = (async () => {
+      const started = performance.now()
       let snapshot
       try {
         snapshot = await adapters[source].scan(Date.now(), { force })
@@ -32,10 +51,14 @@ function createLiveSources(adapters, onUpdate) {
         }
       }
       if (!closed) {
-        snapshots.set(source, snapshot)
+        snapshots.set(source, { ...snapshot, durationMs: Math.round(performance.now() - started) })
+        if (snapshot.needsRefresh) queued.add(source)
         onUpdate(source)
       }
-    })().finally(() => pending.delete(source))
+    })().finally(() => {
+      pending.delete(source)
+      if (queued.delete(source)) wake(source)
+    })
     pending.set(source, operation)
     return operation
   }
@@ -63,9 +86,23 @@ function createLiveSources(adapters, onUpdate) {
         })
         .join(' / '),
       sessions: sources.flatMap((snapshot) => snapshot.sessions),
+      sources: sources.map((snapshot) => ({
+        id: snapshot.source,
+        name: snapshot.source === 'claude' ? 'Claude Code' : 'VS Code / Copilot',
+        state: snapshot.state,
+        message: snapshot.message,
+        scannedAt: snapshot.scannedAt,
+        durationMs: snapshot.durationMs ?? null,
+        acquisition:
+          snapshot.source === 'vscode' ? 'File events + 2s fallback' : 'CLI snapshots every 2s',
+      })),
       scannedAt: checked.length ? Math.max(...checked) : null,
     }
   }
+
+  const unsubscribe = Object.entries(adapters).map(([source, adapter]) =>
+    adapter.subscribe?.(() => wake(source)),
+  )
 
   return {
     view: (source) => (source === 'live' ? combinedView() : snapshots.get(source)),
@@ -76,6 +113,10 @@ function createLiveSources(adapters, onUpdate) {
     },
     close() {
       closed = true
+      for (const stop of unsubscribe) stop?.()
+      for (const timer of wakeTimers.values()) clearTimeout(timer)
+      wakeTimers.clear()
+      queued.clear()
       for (const adapter of Object.values(adapters)) adapter.close()
     },
   }

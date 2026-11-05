@@ -21,6 +21,7 @@ declare global {
     items: PulseAlert[]
     revision: number
     systemNotifications: boolean
+    popupDurationMs?: number
     storageWarning?: string | null
     popup?: { sequence: number; ids: string[] }
   }
@@ -32,6 +33,15 @@ declare global {
     sessions: Session[]
     scannedAt: number | null
     revision: number
+    sources?: {
+      id: string
+      name: string
+      state: string
+      message: string
+      scannedAt: number | null
+      durationMs: number | null
+      acquisition: string
+    }[]
   }
 
   interface PulseMiniState {
@@ -49,6 +59,7 @@ declare global {
       hideAlertPopup: (sequence: number) => Promise<void>
       readyAlertPopup: (sequence: number) => Promise<void>
       setSystemNotifications: (enabled: boolean) => Promise<PulseAlertState>
+      setPopupDuration: (duration: number) => Promise<PulseAlertState>
       onAlerts: (listener: (state: PulseAlertState) => void) => () => void
       getSessionFeed: () => Promise<PulseSessionFeed>
       setSessionArchived: (id: string, archived: boolean) => Promise<void>
@@ -58,26 +69,14 @@ declare global {
         id: string,
         reference?: SessionReference,
       ) => Promise<{
-        mode: 'chat-view' | 'chat-editor' | 'unavailable' | 'stale'
-        verified: boolean
-        code?: string
+        mode: 'pulse-details' | 'stale'
         message?: string
       }>
-      openVSCode: (
-        id: string,
-        reference?: SessionReference,
-      ) => Promise<{
-        mode: 'chat-view' | 'chat-editor' | 'unavailable' | 'stale'
-        verified: boolean
-        code?: string
-        message?: string
-      }>
-      onSessionOpened: (listener: (reference: SessionReference) => void) => () => void
       onSessionFeed: (listener: (feed: PulseSessionFeed) => void) => () => void
       getPinned: () => Promise<boolean>
       setPinned: (pinned: boolean) => Promise<boolean>
       openMini: () => Promise<void>
-      hideMini: () => Promise<void>
+      minimizeMini: () => Promise<void>
       getMiniState: () => Promise<PulseMiniState>
       setMiniCollapsed: (collapsed: boolean) => Promise<PulseMiniState>
       dockMini: (edge: 'left' | 'right') => Promise<PulseMiniState>

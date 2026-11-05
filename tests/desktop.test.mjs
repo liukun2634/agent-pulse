@@ -10,9 +10,6 @@ import {
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import net from 'node:net'
-import { randomUUID } from 'node:crypto'
-import { endpointPath } from '../vscode-companion/bridge.cjs'
 import { pathToFileURL } from 'node:url'
 import { expect } from '@playwright/test'
 import { _electron as electron } from 'playwright'
@@ -75,6 +72,18 @@ test(
       const errors = []
       main.on('pageerror', (error) => errors.push(error.message))
       await expect(main.locator('.session-card')).toHaveCount(3)
+      await expect(
+        main
+          .locator('.session-card')
+          .filter({ hasText: 'Copilot sample' })
+          .locator('.session-entry'),
+      ).toHaveText('Entry: VS Code')
+      await expect(
+        main
+          .locator('.session-card')
+          .filter({ hasText: 'Claude busy sample' })
+          .locator('.session-entry'),
+      ).toHaveText('Entry: Not identified')
       await expect(main.getByRole('button', { name: 'Live', exact: true })).toHaveAttribute(
         'aria-pressed',
         'true',
@@ -107,8 +116,8 @@ test(
       await expect(main.locator('.session-card')).toHaveCount(3)
       await main.locator('.session-card').filter({ hasText: 'Claude busy sample' }).click()
       await expect(
-        main.getByRole('button', { name: 'Continue in terminal', exact: true }),
-      ).toBeDisabled()
+        main.getByRole('button', { name: 'Open original window', exact: true }),
+      ).toHaveCount(0)
       mkdirSync('.artifacts', { recursive: true })
       for (const width of [1440, 390]) {
         await main.setViewportSize({ width, height: 980 })
@@ -145,10 +154,29 @@ test(
       await claudeMini.click()
       await expect(main.locator('.inspector h2')).toHaveText('Claude busy sample')
       await expect(
-        main.getByRole('button', { name: 'Continue in terminal', exact: true }),
-      ).toBeDisabled()
+        main.getByRole('button', { name: 'Open original window', exact: true }),
+      ).toHaveCount(0)
       await main.getByRole('button', { name: 'Demo', exact: true }).click()
       await expect(main.locator('.session-card')).toHaveCount(6)
+      await main.getByRole('button', { name: 'Display settings', exact: true }).click()
+      const connections = main.getByRole('region', { name: 'Source connections' })
+      await expect(connections.locator('.source-connection')).toHaveCount(2)
+      await expect(connections).toContainText('File events + 2s fallback')
+      await expect(connections).toContainText('CLI snapshots every 2s')
+      await expect(connections).not.toContainText('Companion')
+      await expect(connections).not.toContainText('Navigation')
+      await main.setViewportSize({ width: 390, height: 900 })
+      assert.equal(
+        await main.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+        true,
+      )
+      await main.screenshot({
+        path: '.artifacts/source-connections-mobile.png',
+        animations: 'disabled',
+      })
+      await main.setViewportSize({ width: 1440, height: 980 })
+      await main.screenshot({ path: '.artifacts/source-connections.png', animations: 'disabled' })
+      await main.getByRole('button', { name: 'Done', exact: true }).click()
       rows[0].status = 'waiting'
       writeFileSync(fixture, JSON.stringify(rows))
       appendFileSync(
@@ -174,8 +202,12 @@ test(
       const claudeId = alerts.items.find((item) => item.sessionId.startsWith('claude:')).sessionId
       const windowsBefore = application.windows().length
       const result = await main.evaluate((id) => window.pulse.openSession(id), claudeId)
-      assert.equal(result.verified, false)
-      assert.equal(result.code, 'terminal-navigation-unavailable')
+      assert.equal(result.mode, 'pulse-details')
+      await expect(main.locator('.inspector h2')).toHaveText('Claude idle sample')
+      await expect(main.getByRole('button', { name: 'Live', exact: true })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
       assert.equal(application.windows().length, windowsBefore)
       assert.equal((await main.evaluate(() => window.pulse.getAlerts())).items.length, 2)
       await main.getByRole('button', { name: 'Live', exact: true }).click()
@@ -258,19 +290,28 @@ test('desktop pinning, mini monitor and session synchronization', { timeout: 900
     assert.equal(docked.mainMinimized, false)
     assert.ok(Math.abs(docked.width - 360) <= 5, `Unexpected sidebar width: ${docked.width}`)
     assert.ok(Math.abs(docked.rightGap - 12) <= 2, `Unexpected edge gap: ${docked.rightGap}`)
-    await application.evaluate(async ({ BrowserWindow }) => {
+    await application.evaluate(({ BrowserWindow }) => {
       const workspace = BrowserWindow.getAllWindows().find(
         (window) => !window.webContents.getURL().includes('view=mini'),
       )
+      globalThis.mainReveals = 0
+      workspace.on('show', () => globalThis.mainReveals++)
+    })
+    await mini.getByRole('button', { name: 'Minimize mini monitor', exact: true }).click()
+    await expect
+      .poll(() =>
+        application.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()
+            .find((window) => window.webContents.getURL().includes('view=mini'))
+            .isMinimized(),
+        ),
+      )
+      .toBe(true)
+    assert.equal(await application.evaluate(() => globalThis.mainReveals), 0)
+    await application.evaluate(async ({ BrowserWindow }) => {
       const compact = BrowserWindow.getAllWindows().find((window) =>
         window.webContents.getURL().includes('view=mini'),
       )
-      globalThis.mainReveals = 0
-      workspace.on('show', () => globalThis.mainReveals++)
-      await new Promise((resolve) => {
-        compact.once('minimize', resolve)
-        compact.minimize()
-      })
       await new Promise((resolve) => {
         compact.once('restore', resolve)
         compact.restore()
@@ -462,7 +503,7 @@ test('desktop pinning, mini monitor and session synchronization', { timeout: 900
 })
 
 test(
-  'P0 inbox preserves a new reply while an older navigation is in flight',
+  'P0 local details preserve reminders and reject stale request references',
   { timeout: 45000 },
   async () => {
     const temporary = mkdtempSync(path.join(tmpdir(), 'pulse-p0-'))
@@ -507,43 +548,6 @@ test(
     }
     delete environment.ELECTRON_RUN_AS_NODE
     delete environment.PULSE_DEV_SERVER_URL
-    delete environment.PULSE_VSCODE_SCHEME
-    const descriptor = endpointPath(project)
-    const pipe =
-      process.platform === 'win32'
-        ? `\\\\.\\pipe\\pulse-p0-${randomUUID()}`
-        : path.join(temporary, 'test.sock')
-    const token = randomUUID()
-    let release
-    let received
-    const requestReceived = new Promise((resolve) => {
-      received = resolve
-    })
-    let calls = 0
-    const server = net.createServer((socket) => {
-      let input = ''
-      socket.on('error', () => {})
-      socket.on('data', (chunk) => {
-        input += chunk.toString()
-        if (!input.includes('\n')) return
-        const request = JSON.parse(input.trim())
-        assert.equal(request.token, token)
-        const reply = () =>
-          socket.end(
-            JSON.stringify({
-              ok: true,
-              sessionId: request.sessionId,
-              mode: 'chat-view',
-              verified: true,
-            }) + '\n',
-          )
-        calls++
-        if (calls === 1) {
-          release = reply
-          received()
-        } else reply()
-      })
-    })
     let application
     try {
       application = await electron.launch({ args: [process.cwd()], env: environment })
@@ -558,10 +562,6 @@ test(
         shell.openExternal = async (uri) => {
           globalThis.pulseExternalCalls.push(uri)
         }
-      })
-      await main.evaluate(() => {
-        window.pulseReceipts = []
-        window.pulse.onSessionOpened((reference) => window.pulseReceipts.push(reference))
       })
       await main.getByRole('button', { name: 'Notifications', exact: true }).click()
       await expect(main.locator('.pending-alert-row')).toHaveCount(2)
@@ -580,7 +580,9 @@ test(
         'waiting',
       )
       await main.locator('.pending-alert-row .notification-item').click()
-      await expect(main.locator('.pending-alert-error')).toContainText('No new window was opened')
+      await expect(main.locator('.pending-alert-error')).toHaveText([])
+      await expect(main.getByRole('dialog')).not.toBeVisible()
+      await expect(main.locator('.inspector h2')).toHaveText('Task one')
       assert.equal((await main.evaluate(() => window.pulse.getAlerts())).items.length, 1)
       assert.equal(
         JSON.parse(readFileSync(path.join(temporary, 'app', 'reminder-history.json'), 'utf8')).items
@@ -604,19 +606,12 @@ test(
           globalThis.pulseExternalCalls.push(uri)
         }
       })
-      await main.evaluate(() => {
-        window.pulseReceipts = []
-        window.pulse.onSessionOpened((reference) => window.pulseReceipts.push(reference))
-      })
       await main.getByRole('button', { name: 'Notifications', exact: true }).click()
       await expect(main.locator('.pending-alert-row')).toHaveCount(1)
 
-      await new Promise((resolve) => server.listen(pipe, resolve))
-      mkdirSync(path.dirname(descriptor), { recursive: true })
-      writeFileSync(descriptor, JSON.stringify({ pipe, token }))
       const old = initial.items.find((item) => item.task === 'Task one')
       await main.locator('.pending-alert-row .notification-item').click()
-      await requestReceived
+      await expect(main.getByRole('dialog')).not.toBeVisible()
       const completedAt = Date.now()
       appendFileSync(
         path.join(chats, 'one.jsonl'),
@@ -635,36 +630,30 @@ test(
       await expect
         .poll(async () => (await main.evaluate(() => window.pulse.getAlerts())).items[0]?.requestId)
         .toBe('new-turn')
-      release()
-      await expect(main.locator('.pending-alert-row .notification-item')).toBeEnabled()
       assert.equal(
         (await main.evaluate(() => window.pulse.getAlerts())).items[0].requestId,
         'new-turn',
       )
-      assert.deepEqual(await main.evaluate(() => window.pulseReceipts), [])
       const stale = await main.evaluate(
         (alert) =>
-          window.pulse.openVSCode(alert.sessionId, { ...alert.reference, alertId: alert.id }),
+          window.pulse.openSession(alert.sessionId, { ...alert.reference, alertId: alert.id }),
         old,
       )
       assert.equal(stale.mode, 'stale')
-      assert.equal(calls, 1)
+      await main.getByRole('button', { name: 'Notifications', exact: true }).click()
       await main.locator('.pending-alert-row .notification-item').click()
-      await expect(main.getByText('No pending reminders', { exact: true })).toBeVisible()
-      assert.equal((await main.evaluate(() => window.pulseReceipts))[0].requestId, 'new-turn')
+      await expect(main.getByRole('dialog')).not.toBeVisible()
+      assert.equal(
+        (await main.evaluate(() => window.pulse.getAlerts())).items[0].requestId,
+        'new-turn',
+      )
       const seen = await main.evaluate(() =>
         JSON.parse(localStorage.getItem('pulse.seen-replies.v1')),
       )
-      assert.ok(
-        Object.values(seen).some(
-          (value) => typeof value === 'string' && value.includes('new-turn'),
-        ),
-      )
+      assert.deepEqual(seen, {})
       assert.deepEqual(await application.evaluate(() => globalThis.pulseExternalCalls), [])
     } finally {
       if (application) await application.close()
-      server.close()
-      rmSync(descriptor, { force: true })
       rmSync(temporary, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
     }
   },
@@ -706,7 +695,6 @@ test(
     }
     delete environment.ELECTRON_RUN_AS_NODE
     delete environment.PULSE_DEV_SERVER_URL
-    delete environment.PULSE_VSCODE_SCHEME
     let application
 
     try {
@@ -727,7 +715,7 @@ test(
       assert.equal(
         await main.evaluate(async () => {
           try {
-            await window.pulse.openVSCode('untrusted-id')
+            await window.pulse.openSession('untrusted-id')
             return false
           } catch {
             return true
@@ -741,14 +729,15 @@ test(
           globalThis.pulseTestOpenedUri = uri
         }
       })
-      await main.getByRole('button', { name: 'Open in VS Code', exact: true }).click()
-      assert.equal(await application.evaluate(() => globalThis.pulseTestOpenedUri), undefined)
-      const disconnected = await main.evaluate(async () => {
+      await expect(main.getByRole('button', { name: 'Open in VS Code', exact: true })).toHaveCount(
+        0,
+      )
+      const details = await main.evaluate(async () => {
         const feed = await window.pulse.getSessionFeed()
-        return window.pulse.openVSCode(feed.sessions[0].id)
+        return window.pulse.openSession(feed.sessions[0].id)
       })
-      assert.equal(disconnected.mode, 'unavailable')
-      assert.equal(disconnected.verified, false)
+      assert.equal(details.mode, 'pulse-details')
+      assert.equal(await application.evaluate(() => globalThis.pulseTestOpenedUri), undefined)
 
       const miniPromise = application.waitForEvent('window')
       await main.getByRole('button', { name: 'Mini monitor', exact: true }).click()
@@ -845,6 +834,136 @@ test(
       assert.deepEqual(errors, [])
     } finally {
       if (application) await application.close()
+      rmSync(temporary, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    }
+  },
+)
+
+test(
+  'popup duration preferences persist and manual popups remain until closed',
+  { timeout: 45000 },
+  async () => {
+    const temporary = mkdtempSync(path.join(tmpdir(), 'pulse-popup-settings-'))
+    const data = path.join(temporary, 'data')
+    const fixture = path.join(temporary, 'claude.json')
+    mkdirSync(data)
+    writeFileSync(
+      path.join(data, 'notification-settings.json'),
+      JSON.stringify({ version: 2, systemNotifications: false }),
+    )
+    const sample = {
+      kind: 'interactive',
+      sessionId: 'popup-setting-session',
+      cwd: temporary,
+      name: 'Popup settings sample',
+      startedAt: Date.now(),
+      status: 'busy',
+    }
+    writeFileSync(fixture, JSON.stringify([sample]))
+    const environment = {
+      ...process.env,
+      PULSE_TEST_MODE: '1',
+      PULSE_TEST_DATA: data,
+      PULSE_TEST_CLAUDE: fixture,
+    }
+    delete environment.ELECTRON_RUN_AS_NODE
+    delete environment.PULSE_DEV_SERVER_URL
+    delete environment.PULSE_VSCODE_STORAGE
+    let application
+    const popupVisible = () =>
+      application.evaluate(
+        ({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()
+            .find((window) => window.webContents.getURL().includes('view=alerts'))
+            ?.isVisible() ?? false,
+      )
+    try {
+      application = await electron.launch({ args: [process.cwd()], env: environment })
+      let main = await application.firstWindow()
+      await expect(main.locator('.session-card')).toHaveCount(6)
+      await main.getByRole('button', { name: 'Display settings', exact: true }).click()
+      const setting = main.getByRole('combobox', { name: 'Popup duration' })
+      await expect(setting).toHaveValue('5000')
+      await setting.selectOption('0')
+      await expect
+        .poll(() => main.evaluate(async () => (await window.pulse.getAlerts()).popupDurationMs))
+        .toBe(0)
+      await main.evaluate(() => window.pulse.setSystemNotifications(true))
+      assert.equal((await main.evaluate(() => window.pulse.getAlerts())).popupDurationMs, 0)
+      await main.getByRole('button', { name: 'Done', exact: true }).click()
+      await main.evaluate(() => window.pulse.refreshSessions())
+      const opened = application.waitForEvent('window')
+      writeFileSync(fixture, JSON.stringify([{ ...sample, status: 'waiting' }]))
+      await main.evaluate(() => window.pulse.refreshSessions())
+      let popup = await opened
+      await expect(popup.locator('h1')).toHaveText('Input needed in Claude Code')
+      await popup.clock.install()
+      await popup.clock.pauseAt(new Date((await popup.evaluate(() => Date.now())) + 1))
+      await popup.clock.fastForward(60000)
+      await expect(popup.locator('.alert-window')).not.toHaveClass(/alert-fading/)
+      assert.equal(await popupVisible(), true)
+      await popup.getByRole('button', { name: 'Hide notification', exact: true }).click()
+      await popup.clock.runFor(1100)
+      await expect.poll(popupVisible).toBe(false)
+      assert.equal((await main.evaluate(() => window.pulse.getAlerts())).items.length, 1)
+      await main.getByRole('button', { name: 'Display settings', exact: true }).click()
+      await setting.selectOption('10000')
+      await expect
+        .poll(() => main.evaluate(async () => (await window.pulse.getAlerts()).popupDurationMs))
+        .toBe(10000)
+      assert.equal(await popupVisible(), false)
+      const saved = JSON.parse(readFileSync(path.join(data, 'notification-settings.json'), 'utf8'))
+      assert.equal(saved.popupDurationMs, 10000)
+      assert.equal(saved.systemNotifications, true)
+      assert.equal(
+        await main.evaluate(async () => {
+          try {
+            await window.pulse.setPopupDuration(1234)
+            return false
+          } catch {
+            return true
+          }
+        }),
+        true,
+      )
+      mkdirSync('.artifacts', { recursive: true })
+      for (const width of [1440, 390]) {
+        await main.setViewportSize({ width, height: 900 })
+        const bounds = await setting.boundingBox()
+        assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width)
+        await main.screenshot({
+          path: `.artifacts/popup-settings-${width}.png`,
+          animations: 'disabled',
+        })
+      }
+      await application.close()
+      application = await electron.launch({ args: [process.cwd()], env: environment })
+      main = await application.firstWindow()
+      await main.waitForFunction(() => !!window.pulse)
+      const restored = await main.evaluate(() => window.pulse.getAlerts())
+      assert.equal(restored.popupDurationMs, 10000)
+      assert.equal(restored.systemNotifications, true)
+      const reopened = application.waitForEvent('window')
+      await main.evaluate(() => window.pulse.showAlerts())
+      popup = await reopened
+      await expect(popup.locator('h1')).toHaveText('Input needed in Claude Code')
+      await popup.clock.install()
+      await popup.clock.pauseAt(new Date((await popup.evaluate(() => Date.now())) + 1))
+      await popup.evaluate(() => window.pulse.showAlerts())
+      const sequence = (await popup.evaluate(() => window.pulse.getAlerts())).popup.sequence
+      await expect(popup.locator('.alert-window')).toHaveAttribute(
+        'data-popup-sequence',
+        String(sequence),
+      )
+      await popup.mouse.move(-20, -20)
+      await popup.clock.fastForward(9000)
+      await expect(popup.locator('.alert-window')).not.toHaveClass(/alert-fading/)
+      await popup.clock.fastForward(1100)
+      await expect(popup.locator('.alert-window')).toHaveClass(/alert-fading/)
+      await popup.clock.runFor(1100)
+      await expect.poll(popupVisible).toBe(false)
+    } finally {
+      await application?.close()
       rmSync(temporary, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
     }
   },

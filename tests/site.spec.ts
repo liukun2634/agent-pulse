@@ -60,11 +60,7 @@ test('download page enables only published release assets', async ({ page }) => 
           prerelease: true,
           draft: false,
           published_at: '2026-11-04T00:00:00Z',
-          assets: [
-            asset('Agent-Pulse-Setup-0.1.0-x64.exe'),
-            asset('pulse-companion.vsix'),
-            asset('SHA256SUMS.txt'),
-          ],
+          assets: [asset('Agent-Pulse-Setup-0.1.0-x64.exe'), asset('SHA256SUMS.txt')],
         },
       ],
     }),
@@ -78,7 +74,8 @@ test('download page enables only published release assets', async ({ page }) => 
     'href',
     /Agent-Pulse-Setup-0\.1\.0-x64\.exe$/,
   )
-  await expect(page.locator('[data-asset="companion"]')).not.toHaveAttribute('aria-disabled')
+  await expect(page.locator('[data-asset="companion"]')).toHaveCount(0)
+  await expect(page.locator('body')).not.toContainText('Companion')
   await expect(page.locator('[data-release-status]')).toContainText('prerelease')
   for (const width of [1440, 390, 320]) {
     await page.setViewportSize({ width, height: 900 })

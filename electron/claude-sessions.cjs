@@ -99,6 +99,7 @@ function createClaudeSource({
           branch: 'Not reported',
           provider: 'claude',
           source: 'claude',
+          host: 'unknown',
           status,
           statusDetail: detail,
           startedAt: entry.startedAt,

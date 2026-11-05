@@ -1,4 +1,5 @@
 export type Provider = 'claude' | 'codex' | 'copilot'
+export type SessionHost = 'vscode' | 'terminal' | 'desktop' | 'unknown'
 export type SessionStatus =
   'running' | 'waiting' | 'completed' | 'failed' | 'disconnected' | 'unknown' | 'idle' | 'cancelled'
 export type SessionFilter = 'all' | 'running' | 'attention' | 'completed'
@@ -17,6 +18,7 @@ export interface Session {
   branch: string
   provider: Provider
   source?: 'vscode' | 'claude'
+  host?: SessionHost
   statusDetail?: string
   requestId?: string
   requestStartedAt?: number
@@ -58,6 +60,18 @@ export const providers: Record<Provider, { name: string; surface: string }> = {
   claude: { name: 'Claude Code', surface: 'Terminal' },
   codex: { name: 'Codex', surface: 'Terminal' },
   copilot: { name: 'GitHub Copilot', surface: 'VS Code' },
+}
+
+export function sessionHostLabel(session: Session): string {
+  const labels: Record<SessionHost, string> = {
+    vscode: 'VS Code',
+    terminal: 'Terminal',
+    desktop: 'Desktop',
+    unknown: 'Not identified',
+  }
+  if (session.host && Object.hasOwn(labels, session.host)) return labels[session.host]
+  if (session.source === 'vscode') return labels.vscode
+  return session.source ? labels.unknown : providers[session.provider].surface
 }
 
 export const statusLabels: Record<SessionStatus, string> = {

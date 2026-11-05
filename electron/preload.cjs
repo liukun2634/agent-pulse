@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('pulse', {
   readyAlertPopup: (sequence) => ipcRenderer.invoke('pulse:ready-alert-popup', sequence),
   setSystemNotifications: (enabled) =>
     ipcRenderer.invoke('pulse:set-system-notifications', enabled),
+  setPopupDuration: (duration) => ipcRenderer.invoke('pulse:set-popup-duration', duration),
   onAlerts: (listener) => {
     const handler = (_event, state) => listener(state)
     ipcRenderer.on('pulse:alerts', handler)
@@ -24,13 +25,7 @@ contextBridge.exposeInMainWorld('pulse', {
     ipcRenderer.invoke('pulse:set-session-archived', id, archived),
   setSessionSource: (source) => ipcRenderer.invoke('pulse:set-session-source', source),
   refreshSessions: () => ipcRenderer.invoke('pulse:refresh-sessions'),
-  openVSCode: (id, reference) => ipcRenderer.invoke('pulse:open-vscode', id, reference),
   openSession: (id, reference) => ipcRenderer.invoke('pulse:open-session', id, reference),
-  onSessionOpened: (listener) => {
-    const handler = (_event, reference) => listener(reference)
-    ipcRenderer.on('pulse:session-opened', handler)
-    return () => ipcRenderer.removeListener('pulse:session-opened', handler)
-  },
   onSessionFeed: (listener) => {
     const handler = (_event, feed) => listener(feed)
     ipcRenderer.on('pulse:session-feed', handler)
@@ -39,7 +34,7 @@ contextBridge.exposeInMainWorld('pulse', {
   getPinned: () => ipcRenderer.invoke('pulse:get-pinned'),
   setPinned: (pinned) => ipcRenderer.invoke('pulse:set-pinned', pinned),
   openMini: () => ipcRenderer.invoke('pulse:open-mini'),
-  hideMini: () => ipcRenderer.invoke('pulse:hide-mini'),
+  minimizeMini: () => ipcRenderer.invoke('pulse:minimize-mini'),
   getMiniState: () => ipcRenderer.invoke('pulse:get-mini-state'),
   setMiniCollapsed: (collapsed) => ipcRenderer.invoke('pulse:set-mini-collapsed', collapsed),
   dockMini: (edge) => ipcRenderer.invoke('pulse:dock-mini', edge),

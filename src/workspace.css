@@ -1088,6 +1088,51 @@ h1 {
   margin: 0;
   padding: 0;
 }
+.timeline-toggle {
+  min-height: 32px;
+  margin-bottom: 12px;
+}
+.session-entry {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.source-connections-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.source-connections-heading h3,
+.source-connection strong {
+  font-size: 12px;
+}
+.source-connection {
+  border-top: 1px solid var(--border);
+  padding: 12px 0;
+}
+.source-connection dl {
+  margin-top: 8px;
+  font-size: 11px;
+}
+.source-connection dl > div {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 5px;
+}
+.source-connection dt,
+.source-connection p {
+  color: var(--muted);
+}
+.source-connection dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.source-connection p {
+  margin-top: 8px;
+  font-size: 11px;
+}
 .timeline li {
   display: flex;
   gap: 10px;
@@ -1397,6 +1442,19 @@ h1 {
 }
 .setting-row > div {
   flex: 1;
+}
+.popup-setting {
+  flex-wrap: wrap;
+}
+.setting-select {
+  max-width: 100%;
+  min-width: 136px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 12px;
 }
 .setting-row strong {
   display: block;

@@ -143,6 +143,68 @@ test('Claude reminders use their own provider and idle does not announce a reply
   assert.equal(alerts[0].title, 'Input needed in Claude Code')
 })
 
+test('source changes wake collection without waiting for the polling interval and coalesce during a scan', async () => {
+  let changed
+  let finishFirst
+  let scans = 0
+  let stopped = false
+  const published = []
+  let finishSecond
+  const secondPublished = new Promise((resolve) => {
+    finishSecond = resolve
+  })
+  const sources = createLiveSources(
+    {
+      vscode: {
+        subscribe(listener) {
+          changed = listener
+          return () => {
+            stopped = true
+          }
+        },
+        scan() {
+          scans++
+          if (scans === 1)
+            return new Promise((resolve) => {
+              finishFirst = resolve
+            })
+          return Promise.resolve({
+            source: 'vscode',
+            state: 'connected',
+            scannedAt: 2000,
+            sessions: [{ id: 'one', status: 'completed' }],
+          })
+        },
+        close() {},
+      },
+    },
+    () => {
+      published.push(sources.view('live').sessions[0].status)
+      if (published.length === 2) finishSecond()
+    },
+  )
+  try {
+    const first = sources.refresh()
+    for (let count = 0; count < 10; count++) changed()
+    assert.equal(scans, 1)
+    finishFirst({
+      source: 'vscode',
+      state: 'connected',
+      scannedAt: 1000,
+      sessions: [{ id: 'one', status: 'running' }],
+    })
+    await first
+    await secondPublished
+    assert.equal(scans, 2)
+    assert.deepEqual(published, ['running', 'completed'])
+  } finally {
+    sources.close()
+  }
+  changed()
+  assert.equal(stopped, true)
+  assert.equal(scans, 2)
+})
+
 test('combined live view includes both providers and retains healthy sessions during a source failure', async () => {
   let claudeFails = false
   const sources = createLiveSources(

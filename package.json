@@ -17,8 +17,8 @@
     "desktop": "node scripts/desktop.mjs",
     "desktop:dev": "node scripts/desktop.mjs --dev",
     "predesktop:dev": "npm run icons",
-    "dist:win": "npm run icons && npm run build && npm --prefix vscode-companion run package && electron-builder --win nsis --x64 --publish never",
-    "test": "node --test src/sessions.test.ts tests/vscode-sessions.test.cjs tests/claude-sessions.test.cjs tests/companion.test.cjs",
+    "dist:win": "npm run icons && npm run build && electron-builder --win nsis --x64 --publish never",
+    "test": "node --test src/sessions.test.ts tests/vscode-sessions.test.cjs tests/claude-sessions.test.cjs",
     "test:e2e": "playwright test",
     "test:site": "playwright test site.spec.ts",
     "pretest:desktop": "npm run build",
@@ -36,7 +36,6 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "vscode-companion/bridge.cjs",
       "package.json",
       "!node_modules/**/*"
     ],
@@ -48,10 +47,6 @@
       {
         "from": "public/pulse.png",
         "to": "icons/pulse.png"
-      },
-      {
-        "from": ".artifacts/pulse-companion.vsix",
-        "to": "companion/pulse-companion.vsix"
       }
     ],
     "win": {

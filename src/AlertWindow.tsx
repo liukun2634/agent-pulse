@@ -24,7 +24,12 @@ export default function AlertWindow() {
   }, [])
 
   const first = state.items.find((item) => state.popup?.ids.includes(item.id))
-  return <AlertPopup key={`${state.popup?.sequence ?? 0}:${first?.id ?? 'empty'}`} state={state} />
+  return (
+    <AlertPopup
+      key={`${state.popup?.sequence ?? 0}:${first?.id ?? 'empty'}:${state.popupDurationMs ?? 5000}`}
+      state={state}
+    />
+  )
 }
 
 function AlertPopup({ state }: { state: PulseAlertState }) {
@@ -34,7 +39,8 @@ function AlertPopup({ state }: { state: PulseAlertState }) {
   const [fading, setFading] = useState(false)
   const [closing, setClosing] = useState(false)
   const [error, setError] = useState<{ id: string; text: string } | null>(null)
-  const remaining = useRef(5000)
+  const duration = state.popupDurationMs ?? 5000
+  const remaining = useRef(duration)
   const items = state.items.filter((item) => state.popup?.ids.includes(item.id))
   const alert = items[0]
   const sequence = state.popup?.sequence ?? 0
@@ -43,7 +49,7 @@ function AlertPopup({ state }: { state: PulseAlertState }) {
   const activeFade = fading && (closing || (!paused && !busy))
 
   useEffect(() => {
-    if (!hasAlert || paused || busy || fading) return
+    if (!hasAlert || duration === 0 || paused || busy || fading) return
     const started = Date.now()
     const timer = window.setTimeout(() => {
       remaining.current = 0
@@ -53,7 +59,7 @@ function AlertPopup({ state }: { state: PulseAlertState }) {
       window.clearTimeout(timer)
       remaining.current = Math.max(0, remaining.current - (Date.now() - started))
     }
-  }, [hasAlert, paused, busy, fading])
+  }, [hasAlert, duration, paused, busy, fading])
 
   useEffect(() => {
     if (hasAlert) void window.pulse?.readyAlertPopup?.(sequence)
@@ -74,15 +80,13 @@ function AlertPopup({ state }: { state: PulseAlertState }) {
     setBusy(true)
     setError(null)
     try {
-      const result = await (window.pulse?.openSession ?? window.pulse?.openVSCode)?.(
-        alert.sessionId,
-        {
-          ...alert.reference,
-          alertId: alert.id,
-        },
-      )
+      const result = await window.pulse?.openSession(alert.sessionId, {
+        ...alert.reference,
+        alertId: alert.id,
+      })
       if (result?.message)
         setError({ id: alert.id, text: result.message ?? 'The session is not connected.' })
+      else if (result?.mode === 'pulse-details') void window.pulse?.hideAlertPopup(sequence)
     } catch {
       setError({ id: alert.id, text: 'Could not open this session. Try again or open Pulse.' })
     } finally {
@@ -141,12 +145,8 @@ function AlertPopup({ state }: { state: PulseAlertState }) {
         className="alert-open-session"
         disabled={!alert || busy}
         onClick={() => void openAlert()}
-        title={
-          alert?.sessionId.startsWith('claude:') ? 'Continue in Claude Code' : 'Open in VS Code'
-        }
-        aria-label={
-          alert?.sessionId.startsWith('claude:') ? 'Continue in Claude Code' : 'Open in VS Code'
-        }
+        title="View session in Pulse"
+        aria-label="View session in Pulse"
       >
         <span className="alert-content" role="status">
           <strong className="alert-project">{alert?.project}</strong>
