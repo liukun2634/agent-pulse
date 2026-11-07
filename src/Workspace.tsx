@@ -1280,9 +1280,7 @@ function Workspace() {
           <IconButton label="Expand workspace" onClick={expandWorkspace}>
             <Maximize2 size={16} />
           </IconButton>
-          <span className="rail-demo" title={feed.message}>
-            {live ? 'LIVE' : 'DEMO'}
-          </span>
+          <span className="rail-demo">{live ? 'LIVE' : 'DEMO'}</span>
         </footer>
       </div>
     )
@@ -1292,9 +1290,7 @@ function Workspace() {
       <div className="mini-app">
         <header className="mini-header app-drag">
           <Brand compact />
-          <span className="mini-demo" title={feed.message}>
-            {live ? 'LIVE' : 'DEMO'}
-          </span>
+          <span className="mini-demo">{live ? 'LIVE' : 'DEMO'}</span>
           <div className="app-no-drag mini-window-actions">
             <IconButton label="Collapse sidebar" onClick={() => void toggleCollapsed()}>
               <PanelRightClose size={16} />
@@ -1336,9 +1332,9 @@ function Workspace() {
           </span>
         </div>
         <div className="mini-sessions">
-          {live && feed.state !== 'connected' && (
-            <p className="source-message" role="status">
-              {feed.message}
+          {live && miniSessions.length === 0 && (
+            <p className="source-message">
+              {feed.state === 'connecting' ? 'Loading sessions...' : 'No live sessions'}
             </p>
           )}
           {miniPageSessions.map((session) => (
@@ -1468,7 +1464,7 @@ function Workspace() {
           </span>
           <div>
             <strong>{live ? 'Live sessions' : 'Local preview'}</strong>
-            <span>{live ? feed.message : 'No agents connected'}</span>
+            <span>{live ? 'Local agent sources' : 'No agents connected'}</span>
           </div>
           <span className="neutral-dot" />
         </div>
@@ -1594,15 +1590,6 @@ function Workspace() {
               </button>
             </div>
           </div>
-
-          {live && (
-            <div className={`source-summary source-${feed.state}`} role="status">
-              <span>{feed.message}</span>
-              <span>
-                {feed.scannedAt ? `Checked ${relativeTime(feed.scannedAt, now)}` : 'Connecting'}
-              </span>
-            </div>
-          )}
 
           <div className="stats-strip">
             {[
@@ -1779,7 +1766,9 @@ function Workspace() {
                 {visible.length === 0 && (
                   <div className="empty-state">
                     <Inbox size={29} strokeWidth={1.4} />
-                    <h3>{live && sessions.length === 0 ? feed.message : 'No matching sessions'}</h3>
+                    <h3>
+                      {live && sessions.length === 0 ? 'No live sessions' : 'No matching sessions'}
+                    </h3>
                     <button
                       className="button button-secondary"
                       onClick={() => {

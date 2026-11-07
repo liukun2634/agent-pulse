@@ -17,6 +17,68 @@ import { expect } from '@playwright/test'
 import { _electron as electron } from 'playwright'
 
 test(
+  'collector diagnostics stay in settings without monitor banners or hover popups',
+  { timeout: 45000 },
+  async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'pulse-quiet-diagnostics-'))
+    const storage = path.join(root, 'storage')
+    const workspace = path.join(storage, 'workspace-one')
+    const transcripts = path.join(workspace, 'GitHub.copilot-chat', 'transcripts')
+    mkdirSync(transcripts, { recursive: true })
+    writeFileSync(
+      path.join(workspace, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL(root).href }),
+    )
+    writeFileSync(
+      path.join(transcripts, 'healthy.jsonl'),
+      JSON.stringify({
+        type: 'user.message',
+        timestamp: new Date().toISOString(),
+        data: { content: 'Synthetic healthy session' },
+      }) + '\n',
+    )
+    writeFileSync(path.join(transcripts, 'unreadable.jsonl'), '{invalid}\n')
+    const env = {
+      ...process.env,
+      PULSE_TEST_MODE: '1',
+      PULSE_TEST_DATA: path.join(root, 'app'),
+      PULSE_VSCODE_STORAGE: storage,
+    }
+    delete env.ELECTRON_RUN_AS_NODE
+    delete env.PULSE_DEV_SERVER_URL
+    delete env.PULSE_TEST_CLAUDE
+    let application
+    try {
+      application = await electron.launch({ args: [process.cwd()], env })
+      const main = await application.firstWindow()
+      await expect(main.locator('.session-card')).toHaveCount(1)
+      await expect
+        .poll(() => main.evaluate(async () => (await window.pulse.getSessionFeed()).message))
+        .toContain('Some transcripts could not be read')
+      await expect(main.locator('.source-summary')).toHaveCount(0)
+      await expect(main.getByText(/Some transcripts could not be read/).first()).not.toBeVisible()
+      assert.deepEqual((await main.evaluate(() => window.pulse.getAlerts())).popup.ids, [])
+      const opened = application.waitForEvent('window')
+      await main.getByRole('button', { name: 'Mini monitor', exact: true }).click()
+      const mini = await opened
+      await expect(mini.locator('.mini-session')).toHaveCount(1)
+      await expect(mini.getByText(/Some transcripts could not be read/)).toHaveCount(0)
+      await expect(mini.locator('.mini-demo')).not.toHaveAttribute('title')
+      await mini.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
+      await expect(mini.locator('.rail-demo')).not.toHaveAttribute('title')
+      await mini.getByRole('button', { name: 'Expand workspace', exact: true }).click()
+      await main.getByRole('button', { name: 'Display settings', exact: true }).click()
+      await expect(main.getByRole('region', { name: 'Source connections' })).toContainText(
+        'Some transcripts could not be read',
+      )
+    } finally {
+      if (application) await application.close()
+      rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    }
+  },
+)
+
+test(
   'fresh user input displays a popup and restored waiting does not replay it',
   { timeout: 45000 },
   async () => {
@@ -453,7 +515,9 @@ test(
     try {
       application = await electron.launch({ args: [process.cwd()], env: environment })
       main = await application.firstWindow()
-      await expect(main.locator('.source-summary')).toContainText('Could not query Claude')
+      await expect
+        .poll(() => main.evaluate(async () => (await window.pulse.getSessionFeed()).message))
+        .toContain('Could not query Claude')
       await expect(main.locator('.session-running')).toHaveCount(1)
       await setStatus('waiting')
       const initial = await main.evaluate(() => window.pulse.getAlerts())
@@ -751,7 +815,9 @@ test(
       assert.equal((await main.evaluate(() => window.pulse.getAlerts())).items.length, 2)
       writeFileSync(fixture, 'invalid')
       await main.evaluate(() => window.pulse.refreshSessions())
-      await expect(main.locator('.source-summary')).toContainText('Claude Code: Could not query')
+      await expect
+        .poll(() => main.evaluate(async () => (await window.pulse.getSessionFeed()).message))
+        .toContain('Claude Code: Could not query')
       await expect(main.locator('.session-card')).toHaveCount(1)
       await expect(main.locator('.session-card')).toContainText('Copilot sample')
       assert.deepEqual(errors, [])
@@ -1382,8 +1448,10 @@ test(
       rmSync(filename)
       await main.getByRole('button', { name: 'Refresh', exact: true }).click()
       await expect(main.locator('.session-card')).toHaveCount(0)
-      await expect(main.locator('.source-summary')).toContainText('VS Code: No sessions')
-      await expect(main.locator('.source-summary')).toContainText('Claude Code: No sessions')
+      await expect(
+        main.getByRole('heading', { name: 'No live sessions', exact: true }),
+      ).toBeVisible()
+      await expect(main.locator('.source-summary')).toHaveCount(0)
       assert.deepEqual(errors, [])
     } finally {
       if (application) await application.close()
