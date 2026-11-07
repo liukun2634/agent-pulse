@@ -43,21 +43,9 @@ Visit the **[Windows download page](https://liukun2634.github.io/agent-pulse/dow
 
 ## Project status
 
-Agent Pulse is actively evolving, with monitoring as the current focus. Session actions open Pulse details, not external editor or terminal windows. Claude Code uses snapshots by default; development builds also support opt-in local lifecycle hooks. Idle is never treated as a finished reply. The browser preview uses sample data only.
+Agent Pulse is a Windows development preview for local VS Code / GitHub Copilot and Claude Code sessions. More integrations and session navigation are still being developed. Features in the source build may not yet be included in the latest download. The browser preview uses sample data only.
 
-The next development priority is returning to the existing application window for a selected session and focusing its input. This navigation is not available yet. Status-based sorting is deferred.
-
-Keep Pulse running, including in the tray, to receive reminders. Provider formats may vary between versions. Pulse observes sessions without sending messages, approving permissions or installing hooks on your behalf.
-
-## Connections in development builds
-
-In **Settings → Source paths**, choose the VS Code workspace storage directory or Claude executable, select **Test connections**, then **Save paths**. Restart Pulse to apply saved paths. Empty fields use the default or environment-provided location. Connections show the last successful collection separately from the last check.
-
-For optional Claude events, enable **Claude local hooks** and select **Copy Claude hook configuration**. Merge the copied handlers into your own Claude settings using the [official hooks reference](https://code.claude.com/docs/en/hooks), preserving existing handlers. Pulse never edits those settings automatically. Keep the configuration private: it contains a machine-local access token. To remove the integration, remove only Pulse's handlers from Claude settings and disable the Pulse switch.
-
-The listener is restricted to localhost and records lifecycle metadata, not prompt or reply bodies. It correlates native `prompt_id` values when supplied, with an observed-request fallback otherwise. Stop events mean a reply is available, not that the user's task succeeded. Some interruptions, including plain Esc on some versions, have no reliable event; snapshots remain the fallback. Actual Claude-version compatibility must be verified after opt-in.
-
-Development builds also persist live reply-read markers and window preferences. Lists display 50 sessions per page while search and monitoring cover the discovered collection. Restart retention is bounded to 200 reminders, 1000 alert baselines, 5000 read markers and 1000 hook sessions; older entries are evicted first, with retention warnings. These additions are not included in the original v0.1.0 installer.
+Keep Pulse running, including in the tray, to receive reminders. Pulse observes sessions without sending messages or approving permissions. An idle agent is not assumed to have finished its reply.
 
 ## Development
 

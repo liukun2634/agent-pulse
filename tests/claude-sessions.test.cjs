@@ -70,6 +70,98 @@ test('local hooks authenticate, redact content and reject stale prompt completio
   }
 })
 
+test('fresh input hooks alert without a preceding prompt while restored waiting stays silent', async () => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const { tmpdir } = require('node:os')
+  const { createClaudeHooks } = require('../electron/claude-hooks.cjs')
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'pulse-input-hooks-'))
+  const hooks = createClaudeHooks(root)
+  const source = createClaudeSource({
+    query: async () => {
+      throw new Error('CLI unavailable')
+    },
+    hooks,
+  })
+  try {
+    await hooks.enable(true)
+    const events = [
+      { hook_event_name: 'PermissionRequest' },
+      { hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion' },
+      { hook_event_name: 'PreToolUse', tool_name: 'ExitPlanMode' },
+      { hook_event_name: 'Elicitation' },
+      { hook_event_name: 'Notification', notification_type: 'permission_prompt' },
+    ]
+    for (const [index, event] of events.entries()) {
+      assert.equal(
+        hooks.accept({
+          ...event,
+          session_id: `input-${index}`,
+          prompt_id: `prompt-${index}`,
+          cwd: root,
+          tool_input: { private: 'synthetic input body' },
+        }),
+        true,
+      )
+    }
+    assert.equal(
+      hooks.accept({
+        hook_event_name: 'Notification',
+        notification_type: 'idle_prompt',
+        session_id: 'idle-only',
+        cwd: root,
+      }),
+      false,
+    )
+    const sessions = (await source.scan()).sessions
+    const tracker = createAlertTracker()
+    const alerts = tracker.update(sessions)
+    assert.equal(alerts.length, events.length)
+    assert.ok(alerts.every((alert) => alert.status === 'waiting' && !alert.initial))
+    assert.deepEqual(tracker.update(sessions), [])
+    const idleSource = createClaudeSource({
+      hooks,
+      query: async () =>
+        JSON.stringify(
+          events.map((_event, index) => ({
+            ...entry,
+            sessionId: `input-${index}`,
+            cwd: root,
+            status: 'idle',
+          })),
+        ),
+    })
+    try {
+      const idleSnapshot = await idleSource.scan(Date.now() + 3000)
+      assert.ok(idleSnapshot.sessions.every((session) => session.status === 'waiting'))
+    } finally {
+      idleSource.close()
+    }
+    const restoredHooks = createClaudeHooks(root)
+    const restored = createClaudeSource({
+      query: async () => '[]',
+      hooks: { ...restoredHooks, status: () => ({ listening: true }) },
+    })
+    try {
+      const historical = createAlertTracker().update((await restored.scan()).sessions)
+      assert.ok(historical.every((alert) => alert.initial))
+      assert.equal(
+        fs
+          .readFileSync(path.join(root, 'claude-hooks.json'), 'utf8')
+          .includes('synthetic input body'),
+        false,
+      )
+    } finally {
+      restored.close()
+      restoredHooks.close()
+    }
+  } finally {
+    source.close()
+    hooks.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('Claude idle is never running or inferred complete', () => {
   assert.equal(claudeStatus(entry), 'idle')
   assert.equal(claudeStatus({ ...entry, state: 'working' }), 'idle')

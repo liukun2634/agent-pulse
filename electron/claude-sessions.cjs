@@ -49,11 +49,7 @@ function createClaudeSource({
       const existing = sessions.get(id)
       if (existing?.status === 'running' && existing.requestStartedAt > record.updatedAt) continue
       let status = record.status
-      if (
-        ['running', 'waiting'].includes(status) &&
-        existing?.status === 'idle' &&
-        now - record.updatedAt > 2000
-      )
+      if (status === 'running' && existing?.status === 'idle' && now - record.updatedAt > 2000)
         status = 'idle'
       if (
         ['running', 'waiting'].includes(status) &&
@@ -79,6 +75,7 @@ function createClaudeSource({
         finishedAt: record.finishedAt,
         status,
         hookFresh: record.updatedAt >= started,
+        inputEventFresh: status === 'waiting' && hooks.isLiveInput?.(record) === true,
         statusDetail:
           status === 'idle'
             ? 'Snapshot reports idle; no completion event was received.'

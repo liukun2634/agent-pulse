@@ -21,6 +21,8 @@ const { createAlertTracker, matchesReference } = require('./session-alerts.cjs')
 const { createAlertHistory } = require('./alert-history.cjs')
 const { createDesktopState, validateSources, constrainBounds } = require('./desktop-state.cjs')
 const { createClaudeHooks } = require('./claude-hooks.cjs')
+const { createSessionNavigator } = require('./session-navigation.cjs')
+const bridgeProtocol = require('../vscode-session-bridge/protocol.cjs')
 const fs = require('node:fs')
 
 const root = path.join(__dirname, '..')
@@ -99,6 +101,15 @@ const initializedSources = new Set()
 const liveSources = createLiveSources({ vscode: vscodeSource, claude: claudeSource }, (source) => {
   if (!quitting) publishFeed(feed.source === 'demo' ? feed : liveSources.view(feed.source), source)
 })
+const sessionNavigator = createSessionNavigator({
+  getSession: (id) => liveSources.sessions().find((item) => item.id === id),
+  resolveTarget: (id) => vscodeSource.navigationTarget(id),
+  listWindows: () =>
+    bridgeProtocol.listWindows(
+      testMode ? path.join(app.getPath('userData'), 'test-bridges') : undefined,
+    ),
+  send: bridgeProtocol.send,
+})
 let feed = {
   source: testMode && !process.env.PULSE_VSCODE_STORAGE ? 'demo' : 'live',
   state: 'connecting',
@@ -113,12 +124,14 @@ function publishFeed(next, updatedSource) {
   const validSnapshot =
     updatedSource && ['connected', 'empty'].includes(liveSources.view(updatedSource).state)
   if (updatedSource && !validSnapshot) initializedSources.delete(updatedSource)
-  const freshAlerts = alertTracker.update(monitored).map((alert) => ({
-    ...alert,
-    initial:
-      alert.initial ||
-      !initializedSources.has(monitored.find((item) => item.id === alert.sessionId)?.source),
-  }))
+  const freshAlerts = alertTracker.update(monitored).map((alert) => {
+    const current = monitored.find((item) => item.id === alert.sessionId)
+    return {
+      ...alert,
+      initial:
+        alert.initial || (!current?.inputEventFresh && !initializedSources.has(current?.source)),
+    }
+  })
   if (validSnapshot) initializedSources.add(updatedSource)
   feed = {
     ...next,
@@ -732,6 +745,16 @@ async function openSessionDetails(id, expected) {
 ipcMain.handle('pulse:open-session', async (event, id, reference) => {
   trustedWindow(event)
   return openSessionDetails(id, reference)
+})
+ipcMain.handle('pulse:reveal-session', async (event, id, reference, instanceId) => {
+  trustedWindow(event)
+  if (
+    typeof id !== 'string' ||
+    id.length > 512 ||
+    (instanceId !== undefined && (typeof instanceId !== 'string' || instanceId.length > 100))
+  )
+    throw new TypeError('Invalid navigation request.')
+  return sessionNavigator.reveal(id, reference, instanceId)
 })
 ipcMain.handle('pulse:set-pinned', (event, pinned) => {
   if (typeof pinned !== 'boolean') throw new TypeError('Expected a boolean.')

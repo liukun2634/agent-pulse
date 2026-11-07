@@ -16,6 +16,24 @@ release/
 test-results/
 playwright-report/
 
+# Private agent state and credentials
+.env
+.env.*
+.agent-pulse/
+.claude/
+.codex/
+.vscode-test/
+desktop-settings.json
+claude-hooks.json
+reminder-history.json
+session-management.json
+notification-settings.json
+*.pfx
+*.p12
+*.pem
+*.key
+*.dmp
+
 # Customize
 DEVELOPMENT_PLAN.md
 

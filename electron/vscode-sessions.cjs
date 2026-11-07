@@ -269,6 +269,7 @@ async function readChatState(filename, cursor) {
 
 function createVSCodeSource(storagePath, { watchChanges = watch } = {}) {
   const cache = new Map()
+  let navigationTargets = new Map()
   const watchers = new Map()
   const dirtyFiles = new Set()
   const changeListeners = new Set()
@@ -308,6 +309,7 @@ function createVSCodeSource(storagePath, { watchChanges = watch } = {}) {
       directories = await fs.readdir(storagePath, { withFileTypes: true })
     } catch (error) {
       cache.clear()
+      navigationTargets.clear()
       close()
       return {
         source: 'vscode',
@@ -381,6 +383,7 @@ function createVSCodeSource(storagePath, { watchChanges = watch } = {}) {
     const keep = new Set(candidates.map((candidate) => candidate.filename))
     for (const key of cache.keys()) if (!keep.has(key)) cache.delete(key)
     const sessions = []
+    const nextTargets = new Map()
     let needsRefresh = false
 
     for (const candidate of candidates) {
@@ -477,12 +480,17 @@ function createVSCodeSource(storagePath, { watchChanges = watch } = {}) {
             'Session history is still being read; the next update will continue.'
         }
         sessions.push(session)
+        nextTargets.set(session.id, {
+          workspaceStoragePath: path.dirname(path.dirname(candidate.titleFile)),
+          sessionId: path.basename(candidate.filename, '.jsonl'),
+        })
       } catch {
         failures++
         cache.delete(candidate.filename)
       }
     }
 
+    navigationTargets = nextTargets
     return {
       source: 'vscode',
       state: failures ? 'error' : sessions.length ? 'connected' : 'empty',
@@ -505,6 +513,7 @@ function createVSCodeSource(storagePath, { watchChanges = watch } = {}) {
   return {
     scan,
     close,
+    navigationTarget: (id) => navigationTargets.get(id),
     subscribe(listener) {
       changeListeners.add(listener)
       return () => changeListeners.delete(listener)

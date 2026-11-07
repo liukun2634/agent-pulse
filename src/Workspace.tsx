@@ -77,6 +77,76 @@ const SEEN_KEY = 'pulse.seen-replies.v1'
 const desktop = window.pulse
 const miniMode = new URLSearchParams(window.location.search).get('view') === 'mini'
 
+function SessionNavigation({ session }: { session: Session }) {
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const [instanceId, setInstanceId] = useState('')
+  const [choices, setChoices] = useState<{
+    reference: PulseSessionReference
+    windows: { instanceId: string; label: string }[]
+  } | null>(null)
+  async function reveal(reference: PulseSessionReference, chosen?: string) {
+    if (!desktop || busy) return
+    setBusy(true)
+    setMessage('')
+    try {
+      const result = await desktop.revealSession(session.id, reference, chosen)
+      setMessage(result.message)
+      setChoices(result.mode === 'ambiguous' ? { reference, windows: result.windows ?? [] } : null)
+    } catch {
+      setMessage(
+        'The application connection is unavailable. Pulse details and reminders are unchanged.',
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="session-navigation">
+      <button
+        className="button button-secondary open-session-button"
+        disabled={busy}
+        onClick={() => void reveal(referenceForSession(session))}
+      >
+        {busy ? <LoaderCircle size={15} className="spin" /> : <ArrowUpRight size={15} />}
+        Open saved Chat in VS Code
+      </button>
+      {choices && (
+        <div className="navigation-choices">
+          <label>
+            Original VS Code window
+            <select
+              aria-label="Original VS Code window"
+              value={instanceId}
+              onChange={(event) => setInstanceId(event.target.value)}
+            >
+              <option value="">Choose a window</option>
+              {choices.windows.map((window) => (
+                <option key={window.instanceId} value={window.instanceId}>
+                  {window.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="button button-secondary"
+            disabled={busy || !instanceId}
+            onClick={() => void reveal(choices.reference, instanceId)}
+          >
+            <ArrowUpRight size={14} />
+            Open selected window
+          </button>
+        </div>
+      )}
+      {message && (
+        <p className="navigation-feedback" role="status">
+          {message}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function SourceSettings({ hooks }: { hooks?: PulseDesktopSettings['hooks'] | null }) {
   const [settings, setSettings] = useState<PulseDesktopSettings | null>(null)
   const [paths, setPaths] = useState<PulseSourcePaths>({ vscodeStorage: '', claudeExecutable: '' })
@@ -1868,6 +1938,9 @@ function Workspace() {
                   )}
                   <SessionTimeline key={selected.id} session={selected} />
                   <div className="inspector-footer">
+                    {desktop && selected.source === 'vscode' && (
+                      <SessionNavigation key={selected.id} session={selected} />
+                    )}
                     {selected.status === 'completed' && (
                       <button
                         className="button button-secondary open-session-button"

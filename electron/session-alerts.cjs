@@ -75,7 +75,9 @@ function createAlertTracker() {
           sessionId: session.id,
           requestId: session.requestId,
           reference: sessionReference(session),
-          initial: !initialized || recovered,
+          initial:
+            (!initialized || recovered) &&
+            !(session.status === 'waiting' && session.inputEventFresh === true),
           ...(recovered ? { recovered: true } : {}),
           status: session.status,
           title:

@@ -11,6 +11,7 @@
     "build": "tsc -b && vite build",
     "build:site": "node scripts/build-site.mjs",
     "lint": "oxlint",
+    "check:privacy": "node scripts/check-privacy.mjs",
     "preview": "vite preview",
     "icons": "node scripts/icons.mjs",
     "predesktop": "npm run icons && npm run build",
@@ -18,9 +19,10 @@
     "desktop:dev": "node scripts/desktop.mjs --dev",
     "predesktop:dev": "npm run icons",
     "dist:win": "npm run icons && npm run build && electron-builder --win nsis --x64 --publish never",
-    "test": "node --test src/sessions.test.ts tests/vscode-sessions.test.cjs tests/claude-sessions.test.cjs tests/desktop-state.test.cjs",
+    "test": "node --test src/sessions.test.ts tests/vscode-sessions.test.cjs tests/claude-sessions.test.cjs tests/desktop-state.test.cjs tests/session-navigation.test.cjs tests/privacy.test.mjs",
     "test:e2e": "playwright test",
     "test:site": "playwright test site.spec.ts",
+    "test:vscode-bridge": "node scripts/test-vscode-bridge.mjs",
     "pretest:desktop": "npm run build",
     "test:desktop": "node --test tests/desktop.test.mjs",
     "format": "prettier --write src electron scripts tests *.json *.ts index.html README.md"
@@ -35,7 +37,8 @@
     "npmRebuild": false,
     "files": [
       "dist/**/*",
-      "electron/**/*",
+      "electron/**/*.cjs",
+      "vscode-session-bridge/protocol.cjs",
       "package.json",
       "!node_modules/**/*"
     ],
@@ -87,6 +90,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
+    "@vscode/test-electron": "^3.1.0",
     "electron": "^44.9.3",
     "electron-builder": "^26.18.0",
     "oxlint": "^1.88.0",

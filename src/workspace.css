@@ -1,3 +1,29 @@
+.session-navigation {
+  width: 100%;
+  min-width: 0;
+}
+.navigation-feedback {
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  margin: 8px 0;
+}
+.navigation-choices {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+.navigation-choices label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+.navigation-choices select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  font: inherit;
+}
 .mini-pagination {
   display: flex;
   align-items: center;

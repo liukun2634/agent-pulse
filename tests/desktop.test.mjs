@@ -9,10 +9,241 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import net from 'node:net'
+import { randomUUID, randomBytes } from 'node:crypto'
 import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { expect } from '@playwright/test'
 import { _electron as electron } from 'playwright'
+
+test(
+  'fresh user input displays a popup and restored waiting does not replay it',
+  { timeout: 45000 },
+  async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'pulse-input-popup-'))
+    const fixture = path.join(root, 'claude.json')
+    writeFileSync(fixture, 'invalid')
+    const env = {
+      ...process.env,
+      PULSE_TEST_MODE: '1',
+      PULSE_TEST_DATA: path.join(root, 'app'),
+      PULSE_TEST_CLAUDE: fixture,
+    }
+    delete env.ELECTRON_RUN_AS_NODE
+    delete env.PULSE_DEV_SERVER_URL
+    delete env.PULSE_VSCODE_STORAGE
+    let application
+    try {
+      application = await electron.launch({ args: [process.cwd()], env })
+      let main = await application.firstWindow()
+      await expect(main.locator('.session-card')).toHaveCount(6)
+      await application.evaluate(({ clipboard }) => {
+        clipboard.writeText = (value) => {
+          globalThis.testInputHookConfig = value
+        }
+      })
+      await main.evaluate(() => window.pulse.setHooks(true))
+      await main.evaluate(() => window.pulse.copyHooks())
+      const handler = await application.evaluate(
+        () => JSON.parse(globalThis.testInputHookConfig).hooks.PermissionRequest[0].hooks[0],
+      )
+      const opened = application.waitForEvent('window')
+      const response = await fetch(handler.url, {
+        method: 'POST',
+        headers: handler.headers,
+        body: JSON.stringify({
+          hook_event_name: 'PermissionRequest',
+          session_id: 'input-popup',
+          prompt_id: 'input-round',
+          cwd: root,
+          tool_name: 'Read',
+        }),
+      })
+      assert.equal(response.status, 204)
+      const popup = await opened
+      await expect(
+        popup.getByRole('heading', { name: 'Input needed in Claude Code' }),
+      ).toBeVisible()
+      await expect
+        .poll(() =>
+          application.evaluate(({ BrowserWindow }) =>
+            BrowserWindow.getAllWindows()
+              .find((window) => window.webContents.getURL().includes('view=alert'))
+              ?.isVisible(),
+          ),
+        )
+        .toBe(true)
+      const alerts = await main.evaluate(() => window.pulse.getAlerts())
+      assert.equal(alerts.items[0].status, 'waiting')
+      assert.equal(alerts.items[0].initial, false)
+      assert.deepEqual(alerts.popup.ids, [alerts.items[0].id])
+      await popup.getByRole('button', { name: 'Hide notification', exact: true }).click()
+      await expect
+        .poll(() =>
+          application.evaluate(({ BrowserWindow }) =>
+            BrowserWindow.getAllWindows()
+              .find((window) => window.webContents.getURL().includes('view=alert'))
+              ?.isVisible(),
+          ),
+        )
+        .toBe(false)
+      assert.equal((await main.evaluate(() => window.pulse.getAlerts())).items.length, 1)
+      await application.close()
+      application = await electron.launch({ args: [process.cwd()], env })
+      main = await application.firstWindow()
+      await expect(main.locator('.session-card')).toHaveCount(6)
+      const restored = await main.evaluate(() => window.pulse.getAlerts())
+      assert.equal(restored.items.length, 1)
+      assert.deepEqual(restored.popup.ids, [])
+      assert.equal(application.windows().length, 1)
+    } finally {
+      if (application) await application.close()
+      rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    }
+  },
+)
+
+test(
+  'optional VS Code navigation selects the exact bridge without consuming reminders',
+  { timeout: 45000 },
+  async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'pulse-native-navigation-'))
+    const userData = path.join(root, 'app')
+    const storage = path.join(root, 'storage')
+    const workspace = path.join(storage, 'workspace-one')
+    const transcripts = path.join(workspace, 'GitHub.copilot-chat', 'transcripts')
+    const chats = path.join(workspace, 'chatSessions')
+    mkdirSync(transcripts, { recursive: true })
+    mkdirSync(chats, { recursive: true })
+    writeFileSync(
+      path.join(workspace, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL(root).href }),
+    )
+    const timestamp = Date.now()
+    writeFileSync(
+      path.join(transcripts, 'one.jsonl'),
+      JSON.stringify({
+        type: 'user.message',
+        timestamp: new Date(timestamp).toISOString(),
+        data: { content: 'Navigation fixture' },
+      }) + '\n',
+    )
+    writeFileSync(
+      path.join(chats, 'one.jsonl'),
+      JSON.stringify({
+        kind: 0,
+        v: {
+          customTitle: 'Navigation fixture',
+          requests: [{ requestId: 'round-one', timestamp, modelState: { value: 4 } }],
+        },
+      }) + '\n',
+    )
+    const env = {
+      ...process.env,
+      PULSE_TEST_MODE: '1',
+      PULSE_TEST_DATA: userData,
+      PULSE_VSCODE_STORAGE: storage,
+    }
+    delete env.ELECTRON_RUN_AS_NODE
+    delete env.PULSE_DEV_SERVER_URL
+    const servers = []
+    const calls = []
+    let application
+    try {
+      application = await electron.launch({ args: [process.cwd()], env })
+      const main = await application.firstWindow()
+      await expect(main.locator('.session-waiting')).toHaveCount(1)
+      await main.getByRole('button', { name: 'Open saved Chat in VS Code', exact: true }).click()
+      await expect(main.locator('.navigation-feedback')).toContainText('No matching VS Code bridge')
+      const initial = await main.evaluate(() => window.pulse.getAlerts())
+      assert.equal(initial.items.length, 1)
+      const directory = path.join(userData, 'test-bridges')
+      mkdirSync(directory, { recursive: true })
+      const descriptors = []
+      for (const label of ['First window', 'Second window']) {
+        const instanceId = randomUUID()
+        const token = randomBytes(32).toString('hex')
+        const pipe =
+          process.platform === 'win32'
+            ? `\\\\.\\pipe\\pulse-session-${instanceId}`
+            : path.join(tmpdir(), `pulse-session-${instanceId}.sock`)
+        const server = net.createServer((socket) => {
+          let input = ''
+          socket.on('error', () => {})
+          socket.on('data', (chunk) => {
+            input += chunk.toString()
+            if (!input.includes('\n')) return
+            const request = JSON.parse(input.trim())
+            assert.equal(request.token, token)
+            assert.equal(request.workspaceStoragePath, workspace)
+            assert.equal(request.sessionId, 'one')
+            calls.push(instanceId)
+            socket.end(
+              JSON.stringify({
+                ok: true,
+                requestId: request.requestId,
+                instanceId,
+                sessionId: 'one',
+                windowFocused: true,
+                message: 'Navigation requested; input focus is not independently verified.',
+              }) + '\n',
+            )
+          })
+        })
+        servers.push(server)
+        await new Promise((resolve) => server.listen(pipe, resolve))
+        const descriptor = {
+          version: 1,
+          instanceId,
+          token,
+          pipe,
+          workspaceStoragePath: workspace,
+          label,
+          seenAt: Date.now(),
+        }
+        descriptors.push(descriptor)
+        writeFileSync(path.join(directory, `${instanceId}.json`), JSON.stringify(descriptor))
+      }
+      await main.getByRole('button', { name: 'Open saved Chat in VS Code', exact: true }).click()
+      await expect(main.getByRole('combobox', { name: 'Original VS Code window' })).toBeVisible()
+      assert.equal(calls.length, 0)
+      await main
+        .getByRole('combobox', { name: 'Original VS Code window' })
+        .selectOption(descriptors[1].instanceId)
+      await main.getByRole('button', { name: 'Open selected window', exact: true }).click()
+      await expect(main.locator('.navigation-feedback')).toContainText('not independently verified')
+      assert.deepEqual(calls, [descriptors[1].instanceId])
+      assert.deepEqual((await main.evaluate(() => window.pulse.getAlerts())).items, initial.items)
+      assert.deepEqual(
+        (await main.evaluate(() => window.pulse.getDesktopSettings())).seenReplies,
+        {},
+      )
+      const stale = await main.evaluate(
+        (alert) =>
+          window.pulse.revealSession(alert.sessionId, {
+            ...alert.reference,
+            requestId: 'different-round',
+          }),
+        initial.items[0],
+      )
+      assert.equal(stale.mode, 'stale')
+      assert.equal(calls.length, 1)
+      mkdirSync('.artifacts', { recursive: true })
+      await main.screenshot({ path: '.artifacts/navigation-desktop.png', animations: 'disabled' })
+      await main.setViewportSize({ width: 390, height: 844 })
+      await main.locator('.navigation-feedback').scrollIntoViewIfNeeded()
+      assert.equal(
+        await main.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+        true,
+      )
+      await main.screenshot({ path: '.artifacts/navigation-mobile.png', animations: 'disabled' })
+    } finally {
+      if (application) await application.close()
+      for (const server of servers) await new Promise((resolve) => server.close(resolve))
+      rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    }
+  },
+)
 
 test(
   'source paths can be selected, checked and restored on restart',
@@ -98,7 +329,10 @@ test(
       }
       await main.evaluate(() => window.pulse.refreshSessions())
       const replies = (await main.evaluate(() => window.pulse.getAlerts())).items
-      const checked = await main.evaluate((paths) => window.pulse.checkSources(paths), saved.sources)
+      const checked = await main.evaluate(
+        (paths) => window.pulse.checkSources(paths),
+        saved.sources,
+      )
       assert.equal(checked.find((source) => source.id === 'claude').count, 0)
       await main.getByRole('button', { name: 'Done', exact: true }).click()
       const opened = application.waitForEvent('window')

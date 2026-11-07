@@ -1,0 +1,55 @@
+{
+  "name": "pulse-session-bridge",
+  "displayName": "Pulse Session Bridge",
+  "description": "Experimental navigation from Agent Pulse to saved Copilot chats in an existing VS Code window.",
+  "version": "0.1.0",
+  "publisher": "agent-pulse-local",
+  "engines": {
+    "vscode": "^1.141.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.cjs",
+  "files": [
+    "extension.cjs",
+    "navigation.cjs",
+    "protocol.cjs",
+    "README.md"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "pulseSessionBridge.status",
+        "title": "Pulse Session Bridge: Show Status"
+      }
+    ],
+    "configuration": {
+      "title": "Pulse Session Bridge",
+      "properties": {
+        "pulseSessionBridge.windowLabel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional label used to distinguish this window when several instances share a workspace."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "npx --yes @vscode/vsce@3 package --out ../.artifacts/pulse-session-bridge.vsix --allow-missing-repository --skip-license"
+  }
+}

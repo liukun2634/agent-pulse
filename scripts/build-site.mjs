@@ -32,7 +32,15 @@ const icons = {
 }
 await rm(output, { recursive: true, force: true })
 await mkdir(path.join(output, 'assets'), { recursive: true })
-await cp(path.join(root, 'site'), output, { recursive: true })
+for (const filename of [
+  'index.html',
+  'download.html',
+  'styles.css',
+  'releases.js',
+  'assets/workspace.png',
+  'assets/mini.png',
+])
+  await cp(path.join(root, 'site', filename), path.join(output, filename))
 for (const filename of ['workspace.png', 'mini.png'])
   await access(path.join(output, 'assets', filename))
 for (const filename of ['index.html', 'download.html']) {
@@ -52,4 +60,4 @@ for (const [source, target] of [
   ['@fontsource/manrope/LICENSE', 'manrope-LICENSE.txt'],
 ])
   await cp(path.join(root, 'node_modules', source), path.join(output, 'assets', target))
-console.log(`Built project site: ${output}`)
+console.log('Built project site: .artifacts/site')

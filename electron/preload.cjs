@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld('pulse', {
   setSessionSource: (source) => ipcRenderer.invoke('pulse:set-session-source', source),
   refreshSessions: () => ipcRenderer.invoke('pulse:refresh-sessions'),
   openSession: (id, reference) => ipcRenderer.invoke('pulse:open-session', id, reference),
+  revealSession: (id, reference, instanceId) =>
+    ipcRenderer.invoke('pulse:reveal-session', id, reference, instanceId),
   onSessionFeed: (listener) => {
     const handler = (_event, feed) => listener(feed)
     ipcRenderer.on('pulse:session-feed', handler)

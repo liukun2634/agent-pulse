@@ -106,6 +106,16 @@ declare global {
       setSessionArchived: (id: string, archived: boolean) => Promise<void>
       setSessionSource: (source: 'demo' | 'live') => Promise<PulseSessionFeed>
       refreshSessions: () => Promise<PulseSessionFeed>
+      revealSession: (
+        id: string,
+        reference: SessionReference,
+        instanceId?: string,
+      ) => Promise<{
+        mode: 'requested' | 'stale' | 'unavailable' | 'ambiguous'
+        message: string
+        windowFocused?: boolean
+        windows?: { instanceId: string; label: string }[]
+      }>
       openSession: (
         id: string,
         reference?: SessionReference,

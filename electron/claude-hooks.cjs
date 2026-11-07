@@ -6,6 +6,9 @@ const { randomUUID, randomBytes, timingSafeEqual } = require('node:crypto')
 const EVENTS = [
   'UserPromptSubmit',
   'PermissionRequest',
+  'Notification',
+  'Elicitation',
+  'ElicitationResult',
   'PreToolUse',
   'PostToolUse',
   'PostToolUseFailure',
@@ -18,6 +21,7 @@ function createClaudeHooks(directory) {
   let state = { enabled: false, token: randomBytes(32).toString('hex'), port: 0, records: [] }
   let warning = null
   let server
+  let liveInputs = new WeakSet()
   const listeners = new Set()
   try {
     const saved = JSON.parse(fs.readFileSync(filename, 'utf8'))
@@ -69,6 +73,18 @@ function createClaudeHooks(directory) {
     )
       return false
     const event = input.hook_event_name
+    const needsInput =
+      event === 'PermissionRequest' ||
+      event === 'Elicitation' ||
+      (event === 'PreToolUse' && ['AskUserQuestion', 'ExitPlanMode'].includes(input.tool_name)) ||
+      (event === 'Notification' &&
+        [
+          'permission_prompt',
+          'elicitation_dialog',
+          'elicitation_url_dialog',
+          'agent_needs_input',
+        ].includes(input.notification_type))
+    if (event === 'Notification' && !needsInput) return false
     const previous = records.get(input.session_id)
     const nativeId =
       typeof input.prompt_id === 'string' && /^[\w-]{1,160}$/.test(input.prompt_id)
@@ -77,13 +93,16 @@ function createClaudeHooks(directory) {
     if (event === 'UserPromptSubmit' && nativeId && nativeId === previous?.requestId) return false
     if (
       event !== 'UserPromptSubmit' &&
-      (!previous || (nativeId && nativeId !== previous.requestId))
+      ((!previous && !needsInput) || (previous && nativeId && nativeId !== previous.requestId))
     )
       return false
     const requestId =
-      event === 'UserPromptSubmit' ? (nativeId ?? `hook:${randomUUID()}`) : previous.requestId
-    let status =
-      event === 'UserPromptSubmit' || event === 'PostToolUse'
+      event === 'UserPromptSubmit'
+        ? (nativeId ?? `hook:${randomUUID()}`)
+        : (previous?.requestId ?? nativeId ?? `hook:${randomUUID()}`)
+    let status = needsInput
+      ? 'waiting'
+      : event === 'UserPromptSubmit' || event === 'PostToolUse' || event === 'ElicitationResult'
         ? 'running'
         : event === 'PermissionRequest'
           ? 'waiting'
@@ -114,13 +133,14 @@ function createClaudeHooks(directory) {
       cwd: input.cwd,
       requestId,
       status,
-      requestStartedAt: event === 'UserPromptSubmit' ? now : previous.requestStartedAt,
+      requestStartedAt: event === 'UserPromptSubmit' ? now : (previous?.requestStartedAt ?? now),
       updatedAt: now,
       finishedAt: ['completed', 'failed', 'cancelled'].includes(status) ? now : null,
       event,
     }
     records.delete(record.sessionId)
     records.set(record.sessionId, record)
+    if (needsInput) liveInputs.add(record)
     while (records.size > 1000) {
       records.delete(records.keys().next().value)
       state.trimmed = true
@@ -148,6 +168,7 @@ function createClaudeHooks(directory) {
     if (typeof enabled !== 'boolean') throw new TypeError('Expected a boolean.')
     if (!enabled) {
       state.enabled = false
+      liveInputs = new WeakSet()
       if (server) {
         server.closeAllConnections()
         await new Promise((resolve) => server.close(resolve))
@@ -219,6 +240,12 @@ function createClaudeHooks(directory) {
           event,
           [
             {
+              ...(event === 'Notification'
+                ? {
+                    matcher:
+                      'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input',
+                  }
+                : {}),
               hooks: [
                 {
                   type: 'http',
@@ -240,6 +267,7 @@ function createClaudeHooks(directory) {
     configuration,
     accept,
     records: () => (state.enabled ? [...records.values()] : []),
+    isLiveInput: (record) => liveInputs.has(record),
     subscribe: (listener) => {
       listeners.add(listener)
       return () => listeners.delete(listener)
