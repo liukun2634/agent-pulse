@@ -2,6 +2,7 @@ const fs = require('node:fs/promises')
 const { watch } = require('node:fs')
 const path = require('node:path')
 const { fileURLToPath } = require('node:url')
+const { parser } = require('stream-json/parser.js')
 
 const STALE_AFTER = 2 * 60 * 1000
 const INPUT_TOOLS = new Set(['vscode_askQuestions', 'ask_user', 'ask_questions'])
@@ -107,7 +108,7 @@ function applyEvent(state, event) {
   }
 }
 
-function applyChatEvent(chat, entry) {
+function applyChatEvent(chat, entry, requestCount) {
   const pickRequest = (request) => ({
     requestId: request.requestId,
     timestamp: request.timestamp,
@@ -115,7 +116,7 @@ function applyChatEvent(chat, entry) {
     error: !!request.result?.errorDetails,
   })
   const setRequests = (requests) => {
-    chat.requestCount = requests.length
+    chat.requestCount = requestCount ?? requests.length
     chat.request = requests.at(-1) ? pickRequest(requests.at(-1)) : null
   }
   if (entry.kind === 0 && entry.v) {
@@ -130,7 +131,7 @@ function applyChatEvent(chat, entry) {
   } else if (field === 'requests' && entry.k.length === 1 && Array.isArray(entry.v)) {
     if (entry.kind === 1) setRequests(entry.v)
     else if (entry.kind === 2 && entry.v.length) {
-      chat.requestCount = (chat.requestCount ?? 0) + entry.v.length
+      chat.requestCount = (chat.requestCount ?? 0) + (requestCount ?? entry.v.length)
       chat.request = pickRequest(entry.v.at(-1))
     }
   } else if (
@@ -232,6 +233,120 @@ function pollInterval(updatedAt, now = Date.now(), status) {
   return idle < 30000 ? 2000 : idle < 120000 ? 5000 : idle < 600000 ? 15000 : 60000
 }
 
+function createChatMetadataReader(state) {
+  const stream = parser.asStream({ packValues: false, jsonStreaming: true })
+  const fields = {
+    entry: { kind: 'number', k: 'path', v: 'value' },
+    value: {
+      customTitle: 'text',
+      requests: 'requests',
+      requestId: 'text',
+      timestamp: 'number',
+      modelState: 'modelState',
+      result: 'result',
+      value: 'number',
+      completedAt: 'number',
+      errorDetails: 'error',
+    },
+    request: { requestId: 'text', timestamp: 'number', modelState: 'modelState', result: 'result' },
+    modelState: { value: 'number', completedAt: 'number' },
+    result: { errorDetails: 'error' },
+  }
+  const stack = []
+  let entry
+  let requestCount
+  let scalar
+  let failure
+  const nextRole = () => {
+    const parent = stack.at(-1)
+    if (!parent) return 'entry'
+    if (parent.array) {
+      if (parent.role === 'path' && parent.index < 4) return 'text'
+      if (parent.role === 'requests' || parent.role === 'value') return 'request'
+      return undefined
+    }
+    const allowed = fields[parent.role]
+    return allowed && Object.hasOwn(allowed, parent.key) ? allowed[parent.key] : undefined
+  }
+  const store = (value, role) => {
+    const parent = stack.at(-1)
+    if (!parent) {
+      if (value && typeof value === 'object') applyChatEvent(state, value, requestCount)
+      return
+    }
+    if (parent.array) {
+      if (parent.role === 'requests' || parent.role === 'value') parent.value[0] = value
+      else if (parent.role === 'path' && parent.index < 4) parent.value.push(value)
+      parent.index++
+    } else if (role && parent.value && typeof parent.value === 'object') {
+      parent.value[parent.key] = value
+      if (
+        stack.length === 2 &&
+        parent.key === 'customTitle' &&
+        entry.kind === 0 &&
+        typeof value === 'string'
+      )
+        state.title = value
+    }
+  }
+  stream.on('error', (error) => {
+    failure = error
+  })
+  stream.on('data', (token) => {
+    try {
+      if (token.name === 'startObject' || token.name === 'startArray') {
+        if (stack.length >= 256) throw new Error('Chat metadata nesting exceeds read limit.')
+        const role = nextRole()
+        const array = token.name === 'startArray'
+        const value = role === 'error' ? true : role ? (array ? [] : Object.create(null)) : null
+        if (!stack.length) {
+          entry = value
+          requestCount = undefined
+        }
+        stack.push({ role, array, value, key: undefined, index: 0 })
+      } else if (token.name === 'endObject' || token.name === 'endArray') {
+        const frame = stack.pop()
+        if (frame.array && (frame.role === 'requests' || frame.role === 'value'))
+          requestCount = frame.index
+        store(frame.value, frame.role)
+      } else if (['startKey', 'startString', 'startNumber'].includes(token.name)) {
+        scalar = { type: token.name, role: nextRole(), text: '' }
+      } else if (token.name === 'stringChunk' || token.name === 'numberChunk') {
+        const limit = scalar.type === 'startKey' ? 128 : scalar.role === 'error' ? 1 : 4096
+        if (scalar.type === 'startKey' || scalar.role)
+          scalar.text += token.value.slice(0, Math.max(0, limit - scalar.text.length))
+      } else if (token.name === 'endKey') {
+        stack.at(-1).key = scalar.text
+        scalar = undefined
+      } else if (token.name === 'endString' || token.name === 'endNumber') {
+        const value = token.name === 'endNumber' ? Number(scalar.text) : scalar.text
+        store(scalar.role === 'error' ? !!value : value, scalar.role)
+        scalar = undefined
+      } else if (['nullValue', 'trueValue', 'falseValue'].includes(token.name)) {
+        store(token.value, nextRole())
+      }
+    } catch (error) {
+      failure = error
+      stream.destroy(error)
+    }
+  })
+  return {
+    async write(buffer) {
+      if (failure) throw failure
+      await new Promise((resolve, reject) =>
+        stream.write(buffer, (error) => (error ? reject(error) : resolve())),
+      )
+      if (failure) throw failure
+    },
+    get complete() {
+      return stack.length === 0 && !scalar
+    },
+    destroy() {
+      stream.destroy()
+    },
+  }
+}
+
 async function readChatState(filename, cursor) {
   const stat = await fs.stat(filename)
   if (
@@ -239,8 +354,11 @@ async function readChatState(filename, cursor) {
     stat.size < cursor.offset ||
     stat.ino !== cursor.ino ||
     (stat.size === cursor.offset && stat.mtimeMs !== cursor.mtimeMs)
-  )
-    cursor = { offset: 0, remainder: Buffer.alloc(0), ino: stat.ino, state: {} }
+  ) {
+    cursor?.reader.destroy()
+    cursor = { offset: 0, lineBytes: 0, ino: stat.ino, state: { title: cursor?.state.title } }
+    cursor.reader = createChatMetadataReader(cursor.state)
+  }
   const length = Math.min(stat.size - cursor.offset, 8 * 1024 * 1024)
   if (length > 0) {
     const handle = await fs.open(filename, 'r')
@@ -248,22 +366,18 @@ async function readChatState(filename, cursor) {
       const buffer = Buffer.alloc(length)
       const { bytesRead } = await handle.read(buffer, 0, length, cursor.offset)
       cursor.offset += bytesRead
-      const chunk = Buffer.concat([cursor.remainder, buffer.subarray(0, bytesRead)])
+      const chunk = buffer.subarray(0, bytesRead)
+      for (let offset = 0; offset < bytesRead; offset += 64 * 1024)
+        await cursor.reader.write(chunk.subarray(offset, Math.min(offset + 64 * 1024, bytesRead)))
       const boundary = chunk.lastIndexOf(10)
-      if (boundary >= 0)
-        for (const line of chunk.subarray(0, boundary).toString('utf8').split('\n')) {
-          if (line.trim()) applyChatEvent(cursor.state, JSON.parse(line))
-        }
-      cursor.remainder = Buffer.from(chunk.subarray(boundary + 1))
-      if (cursor.remainder.length > 32 * 1024 * 1024)
-        throw new Error('Chat record exceeds read limit.')
+      cursor.lineBytes = boundary >= 0 ? bytesRead - boundary - 1 : cursor.lineBytes + bytesRead
     } finally {
       await handle.close()
     }
   }
   cursor.mtimeMs = stat.mtimeMs
   cursor.hasBacklog = cursor.offset < stat.size
-  cursor.complete = cursor.offset === stat.size && cursor.remainder.length === 0
+  cursor.complete = cursor.offset === stat.size && cursor.lineBytes === 0 && cursor.reader.complete
   return cursor
 }
 
@@ -275,6 +389,7 @@ function createVSCodeSource(storagePath, { watchChanges = watch } = {}) {
   const changeListeners = new Set()
 
   function close() {
+    for (const cached of cache.values()) cached.chat?.reader.destroy()
     for (const watcher of watchers.values()) watcher.close()
     watchers.clear()
     dirtyFiles.clear()
@@ -408,7 +523,10 @@ function createVSCodeSource(storagePath, { watchChanges = watch } = {}) {
         if (candidate.check) {
           try {
             cached.chat = await readChatState(candidate.titleFile, cached.chat)
+            cached.title = cached.chat.state.title ?? cached.title
           } catch (error) {
+            cached.title = cached.chat?.state.title ?? cached.title
+            cached.chat?.reader.destroy()
             cached.chat = undefined
             if (error.code !== 'ENOENT') failures++
           }
@@ -448,7 +566,10 @@ function createVSCodeSource(storagePath, { watchChanges = watch } = {}) {
           }
           cached.mtimeMs = candidate.stat.mtimeMs
         }
-        const session = toSession(cached.state, now, cached.chat?.complete ? cached.chat.state : {})
+        const session = toSession(cached.state, now, {
+          ...(cached.chat?.complete ? cached.chat.state : {}),
+          title: cached.title,
+        })
         if (candidate.check) {
           cached.stat = candidate.stat
           cached.nextCheckAt =

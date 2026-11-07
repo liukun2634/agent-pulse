@@ -215,6 +215,137 @@ test('saved request completion overrides an unfinished transcript and a new requ
   assert.equal(toSession(state, now + 300000, chat).finishedAt, null)
 })
 
+test('large saved chat reads metadata before the body and follows later updates', async () => {
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'pulse-large-chat-'))
+  const source = createVSCodeSource(root)
+  const scan = () => source.scan(now + 2000, { force: true })
+  try {
+    const workspace = path.join(root, 'workspace-one')
+    const transcripts = path.join(workspace, 'GitHub.copilot-chat', 'transcripts')
+    const chats = path.join(workspace, 'chatSessions')
+    await fs.mkdir(transcripts, { recursive: true })
+    await fs.mkdir(chats)
+    await fs.writeFile(
+      path.join(workspace, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL(path.join(root, 'Project')).href }),
+    )
+    await fs.writeFile(
+      path.join(transcripts, 'session-one.jsonl'),
+      JSON.stringify({
+        type: 'user.message',
+        timestamp: new Date(now).toISOString(),
+        data: { content: 'Latest prompt is not the title' },
+      }) + '\n',
+    )
+    const filename = path.join(chats, 'session-one.jsonl')
+    await fs.writeFile(
+      filename,
+      '{"kind":0,"v":{"customTitle":"Stable session title","requests":[{"message":{"text":"',
+    )
+    await fs.appendFile(filename, Buffer.alloc(36 * 1024 * 1024, 120))
+    await fs.appendFile(
+      filename,
+      `"},"requestId":"first","timestamp":${now},"modelState":{"value":1,"completedAt":${now + 1000}}}]}}\n`,
+    )
+    let snapshot = await scan()
+    assert.equal(snapshot.sessions[0].task, 'Stable session title')
+    assert.equal(snapshot.sessions[0].status, 'unknown')
+    assert.equal(snapshot.needsRefresh, true)
+    for (let attempt = 0; attempt < 8 && snapshot.needsRefresh; attempt++) snapshot = await scan()
+    assert.equal(snapshot.needsRefresh, false)
+    assert.equal(snapshot.sessions[0].task, 'Stable session title')
+    assert.equal(snapshot.sessions[0].requestId, 'first')
+    assert.equal(snapshot.sessions[0].status, 'completed')
+    await fs.appendFile(
+      filename,
+      JSON.stringify({ kind: 1, k: ['customTitle'], v: 'Renamed session' }) +
+        '\n' +
+        JSON.stringify({
+          kind: 2,
+          k: ['requests'],
+          v: [{ requestId: 'second', timestamp: now + 2000, modelState: { value: 4 } }],
+        }) +
+        '\n',
+    )
+    snapshot = await scan()
+    assert.equal(snapshot.sessions[0].task, 'Renamed session')
+    assert.equal(snapshot.sessions[0].requestId, 'second')
+    assert.equal(snapshot.sessions[0].status, 'waiting')
+    const renamed = '\u4f60\u597d "quoted" \\ session'
+    const titleUpdate = Buffer.from(JSON.stringify({ kind: 1, k: ['customTitle'], v: renamed }))
+    const split = titleUpdate.indexOf(Buffer.from('\u4f60')) + 1
+    await fs.appendFile(filename, titleUpdate.subarray(0, split))
+    snapshot = await scan()
+    assert.equal(snapshot.sessions[0].task, 'Renamed session')
+    assert.equal(snapshot.sessions[0].status, 'unknown')
+    await fs.appendFile(filename, titleUpdate.subarray(split))
+    assert.equal((await scan()).sessions[0].status, 'unknown')
+    await fs.appendFile(filename, '\n')
+    snapshot = await scan()
+    assert.equal(snapshot.sessions[0].task, renamed)
+    assert.equal(snapshot.sessions[0].status, 'waiting')
+    await fs.appendFile(
+      filename,
+      [
+        {
+          kind: 2,
+          k: ['requests'],
+          v: [
+            { requestId: 'third', timestamp: now + 3000, modelState: { value: 0 } },
+            { requestId: 'fourth', timestamp: now + 4000, modelState: { value: 0 } },
+          ],
+        },
+        { kind: 1, k: ['requests', 3, 'modelState', 'value'], v: 1 },
+        { kind: 1, k: ['requests', 3, 'modelState', 'completedAt'], v: now + 5000 },
+        {
+          kind: 1,
+          k: ['requests', 3, 'result'],
+          v: { errorDetails: { message: 'Discarded error body' } },
+        },
+      ]
+        .map((entry) => JSON.stringify(entry) + '\n')
+        .join(''),
+    )
+    snapshot = await scan()
+    assert.equal(snapshot.sessions[0].requestId, 'fourth')
+    assert.equal(snapshot.sessions[0].finishedAt, now + 5000)
+    assert.equal(snapshot.sessions[0].status, 'failed')
+    assert.equal(JSON.stringify(snapshot).includes('Discarded error body'), false)
+    await fs.appendFile(filename, '{invalid}\n')
+    await fs.appendFile(
+      path.join(transcripts, 'session-one.jsonl'),
+      JSON.stringify({
+        type: 'user.message',
+        timestamp: new Date(now + 6000).toISOString(),
+        data: { content: 'Another prompt must not replace the known title' },
+      }) + '\n',
+    )
+    snapshot = await scan()
+    assert.equal(snapshot.sessions[0].task, renamed)
+    assert.equal(snapshot.sessions[0].requestId, undefined)
+    assert.equal(snapshot.sessions[0].status, 'running')
+    await fs.unlink(filename)
+    assert.equal((await scan()).sessions[0].task, renamed)
+    await fs.writeFile(
+      filename,
+      JSON.stringify({
+        v: {
+          customTitle: 'Recovered title',
+          requests: [{ requestId: 'recovered', timestamp: now + 6000, modelState: { value: 4 } }],
+        },
+        kind: 0,
+      }) + '\n',
+    )
+    snapshot = await scan()
+    assert.equal(snapshot.sessions[0].task, 'Recovered title')
+    assert.equal(snapshot.sessions[0].requestId, 'recovered')
+    assert.equal(snapshot.sessions[0].status, 'waiting')
+  } finally {
+    source.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('source discovers workspaces, tails partial UTF-8 lines and handles truncation', async () => {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'pulse-source-'))
   const source = createVSCodeSource(root)
