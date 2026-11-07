@@ -66,6 +66,20 @@ test('filters compose across provider, task and attention state', () => {
   assert.equal(filterSessions(sessions, 'unknown', 'all', 'all').length, 0)
 })
 
+test('ID search preserves source order and never mutates the monitoring collection', () => {
+  const sessions = createDemoSessions(now)
+  const original = sessions.map((session) => session.id)
+  assert.equal(filterSessions(sessions, sessions[0].id, 'all', 'all')[0].id, sessions[0].id)
+  assert.deepEqual(
+    filterSessions(sessions, '', 'all', 'all').map((session) => session.id),
+    original,
+  )
+  assert.deepEqual(
+    sessions.map((session) => session.id),
+    original,
+  )
+})
+
 test('storage validates malformed, unknown and duplicate entries', () => {
   const sessions = createDemoSessions(now)
   assert.deepEqual(parseSessions(serializeSessions(sessions)), sessions)

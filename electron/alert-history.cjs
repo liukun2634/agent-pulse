@@ -22,6 +22,7 @@ function createAlertHistory(filename, tracker) {
   let warning = null
   let writeError = null
   let blocked = false
+  let trimmed = false
 
   function load() {
     try {
@@ -34,7 +35,12 @@ function createAlertHistory(filename, tracker) {
       )
         throw new Error('Invalid reminder history.')
       tracker.restore(saved.tracker)
-      return saved.items.map((item) => ({ ...item, initial: true }))
+      trimmed = saved.trimmed === true
+      return saved.items.map((item) => ({
+        ...item,
+        initial: true,
+        ...(item.sessionId.startsWith('claude:') ? { recovered: true } : {}),
+      }))
     } catch (error) {
       tracker.reset()
       if (error.code !== 'ENOENT') {
@@ -51,9 +57,12 @@ function createAlertHistory(filename, tracker) {
 
   function save(items) {
     if (blocked) return
+    const baseline = tracker.snapshot()
+    trimmed ||= items.length > 200 || baseline.omitted > 0
     const value = JSON.stringify({
       version: 1,
-      tracker: tracker.snapshot(),
+      tracker: baseline,
+      trimmed,
       items: items.slice(-200),
     })
     if (value === serialized) return
@@ -73,7 +82,13 @@ function createAlertHistory(filename, tracker) {
     load,
     save,
     get warning() {
-      return warning ?? writeError
+      return (
+        warning ??
+        writeError ??
+        (trimmed
+          ? 'History retention limits were reached. Only the newest 200 reminders and 1000 baselines are stored; older entries may not survive restart.'
+          : null)
+      )
     },
   }
 }

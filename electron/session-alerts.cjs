@@ -2,6 +2,7 @@ function sessionReference(session) {
   return {
     sessionId: session.id,
     requestId: session.requestId ?? null,
+    ...(session.observationId ? { observationId: session.observationId } : {}),
     status: session.status,
     finishedAt: session.finishedAt ?? null,
     updatedAt: session.updatedAt ?? 0,
@@ -14,6 +15,7 @@ function matchesReference(session, reference) {
     !reference ||
     session.id !== reference.sessionId ||
     (session.requestId ?? null) !== reference.requestId ||
+    session.observationId !== reference.observationId ||
     session.status !== reference.status
   )
     return false
@@ -35,8 +37,18 @@ function createAlertTracker() {
     for (const session of sessions) {
       if (['unknown', 'disconnected'].includes(session.status)) continue
       const previous = observed.get(session.id)
+      const recovered = Boolean(
+        session.source === 'claude' &&
+        !session.hookFresh &&
+        previous &&
+        session.observationId &&
+        previous.observationId !== session.observationId,
+      )
       const newRequest =
-        !!previous?.requestId && !!session.requestId && previous.requestId !== session.requestId
+        !recovered &&
+        !!previous?.requestId &&
+        !!session.requestId &&
+        previous.requestId !== session.requestId
       const terminal = ['completed', 'failed', 'cancelled'].includes(session.status)
       const resumed =
         previous &&
@@ -44,8 +56,14 @@ function createAlertTracker() {
         !terminal &&
         (newRequest || !previous.requestId)
       const active = ['running', 'waiting', 'idle'].includes(session.status)
-      const wasActive = newRequest || resumed || previous?.active === true
-      const terminalSent = newRequest || resumed ? false : previous?.terminalSent === true
+      const wasActive =
+        !recovered &&
+        (newRequest ||
+          resumed ||
+          previous?.active === true ||
+          (session.hookFresh && Number.isFinite(session.requestStartedAt)))
+      const terminalSent =
+        newRequest || resumed || recovered ? false : previous?.terminalSent === true
       const needsInput =
         session.status === 'waiting' &&
         (previous ? previous.status !== 'waiting' || newRequest : true)
@@ -57,7 +75,8 @@ function createAlertTracker() {
           sessionId: session.id,
           requestId: session.requestId,
           reference: sessionReference(session),
-          initial: !initialized,
+          initial: !initialized || recovered,
+          ...(recovered ? { recovered: true } : {}),
           status: session.status,
           title:
             session.status === 'waiting'
@@ -74,12 +93,19 @@ function createAlertTracker() {
       observed.set(session.id, {
         status: session.status,
         requestId: session.requestId ?? previous?.requestId,
+        observationId: session.observationId,
         active: active || wasActive,
         terminalSent: terminal || terminalSent,
       })
     }
     initialized = true
-    while (observed.size > 1000) observed.delete(observed.keys().next().value)
+    if (observed.size > 1000) {
+      const currentIds = new Set(sessions.map((session) => session.id))
+      for (const id of observed.keys()) {
+        if (!currentIds.has(id)) observed.delete(id)
+        if (observed.size <= 1000) break
+      }
+    }
     return alerts
   }
 
@@ -89,7 +115,12 @@ function createAlertTracker() {
   }
 
   function snapshot() {
-    return { version: 1, sequence, observed: [...observed] }
+    return {
+      version: 1,
+      sequence,
+      observed: [...observed].slice(-1000),
+      omitted: Math.max(0, observed.size - 1000),
+    }
   }
 
   function restore(saved) {
@@ -112,6 +143,7 @@ function createAlertTracker() {
           entry[1].status,
         ) &&
         (entry[1].requestId === undefined || typeof entry[1].requestId === 'string') &&
+        (entry[1].observationId === undefined || typeof entry[1].observationId === 'string') &&
         typeof entry[1].active === 'boolean' &&
         typeof entry[1].terminalSent === 'boolean',
     )

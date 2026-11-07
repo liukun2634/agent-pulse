@@ -3,6 +3,23 @@ import type { Session, SessionReference } from './sessions'
 export {}
 
 declare global {
+  interface PulseSourcePaths {
+    vscodeStorage: string
+    claudeExecutable: string
+  }
+  interface PulseDesktopSettings {
+    seenReplies: Record<string, string | number>
+    windowState: { mode: 'workspace' | 'mini' }
+    hooks: {
+      enabled: boolean
+      listening: boolean
+      lastEventAt: number | null
+      warning: string | null
+    }
+    sources: PulseSourcePaths
+    activeSources: PulseSourcePaths
+    warning: string | null
+  }
   type PulseSessionReference = SessionReference
   interface PulseAlert {
     id: string
@@ -10,6 +27,7 @@ declare global {
     requestId?: string
     reference: SessionReference
     initial: boolean
+    recovered?: boolean
     status: 'waiting' | 'completed' | 'failed'
     title: string
     project: string
@@ -39,6 +57,9 @@ declare global {
       state: string
       message: string
       scannedAt: number | null
+      lastSuccessAt: number | null
+      metrics?: { discovered: number; checked: number; events: number } | null
+      hooks?: PulseDesktopSettings['hooks'] | null
       durationMs: number | null
       acquisition: string
     }[]
@@ -51,6 +72,26 @@ declare global {
 
   interface Window {
     pulse?: {
+      syncReadState: (
+        legacy: Record<string, string | number>,
+      ) => Promise<{ revision: number; seenReplies: Record<string, string | number> }>
+      markRead: (
+        reference: SessionReference,
+      ) => Promise<{ revision: number; seenReplies: Record<string, string | number> }>
+      onReadState: (
+        listener: (value: {
+          revision: number
+          seenReplies: Record<string, string | number>
+        }) => void,
+      ) => () => void
+      getDesktopSettings: () => Promise<PulseDesktopSettings>
+      setHooks: (enabled: boolean) => Promise<PulseDesktopSettings>
+      copyHooks: () => Promise<void>
+      saveSources: (value: PulseSourcePaths) => Promise<PulseDesktopSettings>
+      browseSource: (key: keyof PulseSourcePaths) => Promise<string | null>
+      checkSources: (
+        value: PulseSourcePaths,
+      ) => Promise<{ id: string; state: string; message: string; count: number }[]>
       getAlerts: () => Promise<PulseAlertState>
       dismissAlert: (id: string) => Promise<void>
       showAlerts: () => Promise<void>

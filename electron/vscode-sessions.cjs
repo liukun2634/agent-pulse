@@ -378,13 +378,12 @@ function createVSCodeSource(storagePath, { watchChanges = watch } = {}) {
     for (const filename of dirtyFiles) if (!present.has(filename)) dirtyFiles.delete(filename)
 
     candidates.sort((first, second) => second.stat.mtimeMs - first.stat.mtimeMs)
-    const selected = candidates.slice(0, 100)
-    const keep = new Set(selected.map((candidate) => candidate.filename))
+    const keep = new Set(candidates.map((candidate) => candidate.filename))
     for (const key of cache.keys()) if (!keep.has(key)) cache.delete(key)
     const sessions = []
     let needsRefresh = false
 
-    for (const candidate of selected) {
+    for (const candidate of candidates) {
       try {
         let cached = cache.get(candidate.filename)
         if (
@@ -487,6 +486,11 @@ function createVSCodeSource(storagePath, { watchChanges = watch } = {}) {
     return {
       source: 'vscode',
       state: failures ? 'error' : sessions.length ? 'connected' : 'empty',
+      metrics: {
+        discovered: candidates.length,
+        checked: candidates.filter((candidate) => candidate.check).length,
+        events: sessions.reduce((count, item) => count + item.events.length, 0),
+      },
       needsRefresh,
       message: failures
         ? 'Some transcripts could not be read; available sessions are shown.'

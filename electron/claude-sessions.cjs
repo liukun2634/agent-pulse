@@ -1,6 +1,6 @@
 const { execFile } = require('node:child_process')
 const { promisify } = require('node:util')
-const { createHash } = require('node:crypto')
+const { createHash, randomUUID } = require('node:crypto')
 const path = require('node:path')
 const os = require('node:os')
 
@@ -18,12 +18,17 @@ function claudeStatus(entry) {
 }
 
 function createClaudeSource({
+  hooks,
+  executable = process.env.PULSE_CLAUDE_CLI ||
+    (process.platform === 'win32' ? 'claude.exe' : 'claude'),
   query = async (signal) => {
-    const result = await execute(
-      process.env.PULSE_CLAUDE_CLI || (process.platform === 'win32' ? 'claude.exe' : 'claude'),
-      ['agents', '--json', '--all'],
-      { encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 2 * 1024 * 1024, signal },
-    )
+    const result = await execute(executable, ['agents', '--json', '--all'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5000,
+      maxBuffer: 2 * 1024 * 1024,
+      signal,
+    })
     return result.stdout
   },
   configRoot = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'),
@@ -34,6 +39,90 @@ function createClaudeSource({
   let controller
   let closed = false
   let sequence = 0
+  const started = Date.now()
+
+  function withHooks(snapshot, now) {
+    if (!hooks?.status().listening) return { ...snapshot, hookStatus: hooks?.status() ?? null }
+    const sessions = new Map(snapshot.sessions.map((session) => [session.id, session]))
+    for (const record of hooks.records()) {
+      const id = `claude:${scope}:${record.sessionId}`
+      const existing = sessions.get(id)
+      if (existing?.status === 'running' && existing.requestStartedAt > record.updatedAt) continue
+      let status = record.status
+      if (
+        ['running', 'waiting'].includes(status) &&
+        existing?.status === 'idle' &&
+        now - record.updatedAt > 2000
+      )
+        status = 'idle'
+      if (
+        ['running', 'waiting'].includes(status) &&
+        ['error', 'unavailable'].includes(snapshot.state) &&
+        now - record.updatedAt > 120000
+      )
+        status = 'unknown'
+      sessions.set(id, {
+        ...existing,
+        id,
+        source: 'claude',
+        provider: 'claude',
+        host: existing?.host ?? 'unknown',
+        project: existing?.project ?? path.basename(record.cwd),
+        task: existing?.task ?? 'Claude Code session',
+        branch: existing?.branch ?? 'Not reported',
+        files: existing?.files ?? 0,
+        startedAt: existing?.startedAt ?? record.requestStartedAt,
+        requestId: record.requestId,
+        observationId: 'claude-hooks',
+        requestStartedAt: record.requestStartedAt,
+        updatedAt: record.updatedAt,
+        finishedAt: record.finishedAt,
+        status,
+        hookFresh: record.updatedAt >= started,
+        statusDetail:
+          status === 'idle'
+            ? 'Snapshot reports idle; no completion event was received.'
+            : `Claude hook: ${record.event}. No conversation content is stored.`,
+        events: [
+          ...(existing?.events ?? []),
+          {
+            id: `hook-${record.requestId}-${record.updatedAt}`,
+            at: record.updatedAt,
+            text: `Claude ${record.event}`,
+            kind: status === 'completed' ? 'success' : status === 'failed' ? 'error' : 'info',
+          },
+        ].slice(-40),
+      })
+    }
+    return {
+      ...snapshot,
+      sessions: [...sessions.values()],
+      hookStatus: hooks.status(),
+      acquisition: 'Local hooks + CLI snapshots',
+      state: ['error', 'unavailable', 'empty'].includes(snapshot.state)
+        ? sessions.size
+          ? 'connected'
+          : 'empty'
+        : snapshot.state,
+      message: ['error', 'unavailable'].includes(snapshot.state)
+        ? 'Local hooks active; CLI snapshots unavailable.'
+        : snapshot.message,
+    }
+  }
+
+  function beginRecovery() {
+    if (closed) return
+    cache = new Map(
+      [...cache].map(([id, item]) => [
+        id,
+        {
+          ...item,
+          status: 'disconnected',
+          statusDetail: 'Claude Code status is temporarily unavailable.',
+        },
+      ]),
+    )
+  }
 
   async function collect(now) {
     controller = new AbortController()
@@ -65,9 +154,18 @@ function createClaudeSource({
         const previous = cache.get(id)
         const status = claudeStatus(entry)
         const changed = !previous || previous.status !== status
+        const observationId =
+          previous && previous.status !== 'disconnected' ? previous.observationId : randomUUID()
+        const continuous = previous?.observationId === observationId
         const newRun = status === 'running' && !['running', 'waiting'].includes(previous?.status)
-        const requestStartedAt = newRun ? now : previous?.requestStartedAt
-        const requestId = newRun ? `observed-${now}-${++sequence}` : previous?.requestId
+        const requestStartedAt =
+          newRun || (status === 'running' && !Number.isFinite(previous?.requestStartedAt))
+            ? now
+            : continuous
+              ? previous?.requestStartedAt
+              : undefined
+        const requestId =
+          newRun || !continuous ? `observed-${observationId}-${++sequence}` : previous.requestId
         const terminal = ['completed', 'failed', 'cancelled'].includes(status)
         const finishedAt = terminal ? (changed ? now : previous.finishedAt) : null
         const text = {
@@ -105,6 +203,7 @@ function createClaudeSource({
           startedAt: entry.startedAt,
           requestStartedAt,
           requestId,
+          observationId,
           updatedAt: changed ? now : previous.updatedAt,
           finishedAt,
           files: 0,
@@ -146,6 +245,7 @@ function createClaudeSource({
         sessions: [...next.values()],
       }
     } catch (error) {
+      beginRecovery()
       return {
         source: 'claude',
         state: error.code === 'ENOENT' ? 'unavailable' : 'error',
@@ -156,21 +256,21 @@ function createClaudeSource({
               ? 'Claude Code query timed out. Pulse will retry.'
               : 'Could not query Claude Code sessions. Check the CLI version and retry.',
         scannedAt: now,
-        sessions: [...cache.values()].map((item) => ({
-          ...item,
-          status: 'disconnected',
-          statusDetail: 'Claude Code status is temporarily unavailable.',
-        })),
+        sessions: [...cache.values()],
       }
     }
   }
 
   return {
+    beginRecovery,
+    subscribe: (listener) => hooks?.subscribe(listener),
     scan(now = Date.now()) {
       if (closed) return Promise.reject(new Error('Claude source is closed.'))
-      pending ??= collect(now).finally(() => {
-        pending = null
-      })
+      pending ??= collect(now)
+        .then((snapshot) => withHooks(snapshot, now))
+        .finally(() => {
+          pending = null
+        })
       return pending
     },
     close() {

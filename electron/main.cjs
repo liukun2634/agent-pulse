@@ -1,6 +1,8 @@
 const {
   app,
   BrowserWindow,
+  clipboard,
+  dialog,
   ipcMain,
   Menu,
   nativeImage,
@@ -17,6 +19,8 @@ const { createClaudeSource } = require('./claude-sessions.cjs')
 const { createLiveSources } = require('./live-sources.cjs')
 const { createAlertTracker, matchesReference } = require('./session-alerts.cjs')
 const { createAlertHistory } = require('./alert-history.cjs')
+const { createDesktopState, validateSources, constrainBounds } = require('./desktop-state.cjs')
+const { createClaudeHooks } = require('./claude-hooks.cjs')
 const fs = require('node:fs')
 
 const root = path.join(__dirname, '..')
@@ -25,6 +29,25 @@ const packagedApp = app.isPackaged && !process.defaultApp
 const iconRoot = packagedApp ? path.join(process.resourcesPath, 'icons') : path.join(root, 'public')
 const iconPath = path.join(iconRoot, process.platform === 'win32' ? 'pulse.ico' : 'pulse.png')
 const testMode = process.env.PULSE_TEST_MODE === '1'
+app.setName('Pulse')
+if (testMode && process.env.PULSE_TEST_DATA) app.setPath('userData', process.env.PULSE_TEST_DATA)
+const desktopState = createDesktopState(path.join(app.getPath('userData'), 'desktop-settings.json'))
+const claudeHooks = createClaudeHooks(app.getPath('userData'))
+const sourceDefaults = {
+  vscodeStorage:
+    process.env.PULSE_VSCODE_STORAGE ||
+    (testMode
+      ? path.join(app.getPath('userData'), 'no-vscode-storage')
+      : path.join(app.getPath('appData'), 'Code', 'User', 'workspaceStorage')),
+  claudeExecutable:
+    process.env.PULSE_CLAUDE_CLI || (process.platform === 'win32' ? 'claude.exe' : 'claude'),
+}
+const activeSources = Object.fromEntries(
+  Object.entries(sourceDefaults).map(([key, fallback]) => [
+    key,
+    desktopState.snapshot().sources[key] || fallback,
+  ]),
+)
 const applicationId = testMode
   ? 'dev.pulse.agent-monitor.test'
   : packagedApp
@@ -50,25 +73,28 @@ const nativeNotifications = new Set()
 let archivedSessions = new Map()
 let tray
 let quitting = false
-let windowMode = 'workspace'
-let miniState = { collapsed: false, edge: 'right' }
-let expandedMiniSize = [360, 600]
-const vscodeSource = createVSCodeSource(
-  process.env.PULSE_VSCODE_STORAGE ||
-    (testMode
-      ? path.join(process.env.PULSE_TEST_DATA || app.getPath('temp'), 'no-vscode-storage')
-      : path.join(app.getPath('appData'), 'Code', 'User', 'workspaceStorage')),
-)
-const claudeSource = createClaudeSource(
-  testMode
-    ? {
-        query: async () =>
-          process.env.PULSE_TEST_CLAUDE
-            ? fs.promises.readFile(process.env.PULSE_TEST_CLAUDE, 'utf8')
-            : '[]',
-      }
-    : {},
-)
+let windowMode = desktopState.snapshot().windowState.mode
+let miniState = {
+  collapsed: desktopState.snapshot().windowState.mini?.collapsed === true,
+  edge: desktopState.snapshot().windowState.mini?.edge === 'left' ? 'left' : 'right',
+}
+let expandedMiniSize = desktopState.snapshot().windowState.mini?.expandedSize ?? [360, 600]
+const vscodeSource = createVSCodeSource(activeSources.vscodeStorage)
+function makeClaudeSource(executable, useHooks = true) {
+  return createClaudeSource({
+    executable,
+    hooks: useHooks ? claudeHooks : undefined,
+    ...(testMode
+      ? {
+          query: async () =>
+            process.env.PULSE_TEST_CLAUDE
+              ? fs.promises.readFile(process.env.PULSE_TEST_CLAUDE, 'utf8')
+              : '[]',
+        }
+      : {}),
+  })
+}
+const claudeSource = makeClaudeSource(activeSources.claudeExecutable)
 const initializedSources = new Set()
 const liveSources = createLiveSources({ vscode: vscodeSource, claude: claudeSource }, (source) => {
   if (!quitting) publishFeed(feed.source === 'demo' ? feed : liveSources.view(feed.source), source)
@@ -84,13 +110,16 @@ let feed = {
 let feedTimer
 function publishFeed(next, updatedSource) {
   const monitored = liveSources.sessions()
+  const validSnapshot =
+    updatedSource && ['connected', 'empty'].includes(liveSources.view(updatedSource).state)
+  if (updatedSource && !validSnapshot) initializedSources.delete(updatedSource)
   const freshAlerts = alertTracker.update(monitored).map((alert) => ({
     ...alert,
     initial:
       alert.initial ||
       !initializedSources.has(monitored.find((item) => item.id === alert.sessionId)?.source),
   }))
-  if (updatedSource) initializedSources.add(updatedSource)
+  if (validSnapshot) initializedSources.add(updatedSource)
   feed = {
     ...next,
     sources: liveSources.view('live').sources,
@@ -99,13 +128,30 @@ function publishFeed(next, updatedSource) {
   }
   for (const window of windows) window.webContents.send('pulse:session-feed', feed)
   const previousCount = pendingAlerts.length
-  pendingAlerts = pendingAlerts.filter((alert) => {
-    const current = monitored.find((item) => item.id === alert.sessionId)
-    if (!current || ['unknown', 'disconnected'].includes(current.status)) return true
-    if (alert.requestId && current.requestId && alert.requestId !== current.requestId) return false
-    if (alert.status !== 'waiting' && alert.requestId) return true
-    return current.status === alert.status
-  })
+  let recoveryChanged = false
+  pendingAlerts = pendingAlerts
+    .map((alert) => {
+      const current = monitored.find((item) => item.id === alert.sessionId)
+      if (
+        !alert.recovered &&
+        current?.source === 'claude' &&
+        current.observationId &&
+        current.observationId !== alert.reference.observationId
+      ) {
+        recoveryChanged = true
+        return { ...alert, recovered: true }
+      }
+      return alert
+    })
+    .filter((alert) => {
+      if (alert.recovered) return true
+      const current = monitored.find((item) => item.id === alert.sessionId)
+      if (!current || ['unknown', 'disconnected'].includes(current.status)) return true
+      if (alert.requestId && current.requestId && alert.requestId !== current.requestId)
+        return false
+      if (alert.status !== 'waiting' && alert.requestId) return true
+      return current.status === alert.status
+    })
   for (const alert of freshAlerts) {
     pendingAlerts = pendingAlerts.filter((item) => item.sessionId !== alert.sessionId)
     pendingAlerts.push(alert)
@@ -118,7 +164,12 @@ function publishFeed(next, updatedSource) {
       })
   }
   const storageChanged = persistAlertHistory()
-  if (freshAlerts.length || previousCount !== pendingAlerts.length || storageChanged)
+  if (
+    freshAlerts.length ||
+    previousCount !== pendingAlerts.length ||
+    recoveryChanged ||
+    storageChanged
+  )
     publishAlerts()
   const popups = freshAlerts.filter((alert) => !alert.initial)
   if (popups.length) showAlertWindow(popups.map((alert) => alert.id))
@@ -226,9 +277,7 @@ async function refreshFeed(force = false) {
   return feed
 }
 
-app.setName('Pulse')
 app.setAppUserModelId(applicationId)
-if (testMode && process.env.PULSE_TEST_DATA) app.setPath('userData', process.env.PULSE_TEST_DATA)
 if (devUrl) {
   const parsed = new URL(devUrl)
   if (parsed.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(parsed.hostname)) {
@@ -275,13 +324,58 @@ function loadWindow(window, view = '') {
   return window.loadFile(entry, view ? { query: { view } } : {})
 }
 
+function windowArea(bounds) {
+  return bounds &&
+    ['x', 'y', 'width', 'height'].every(
+      (key) => Number.isSafeInteger(bounds[key]) && Math.abs(bounds[key]) < 100000,
+    )
+    ? screen.getDisplayMatching(bounds).workArea
+    : screen.getPrimaryDisplay().workArea
+}
+function trackWindow(window, mode) {
+  let timer
+  const capture = () => {
+    if (window.isDestroyed() || window.isMinimized() || !window.isVisible()) return
+    try {
+      desktopState.saveWindow(mode, {
+        bounds: window.getNormalBounds(),
+        pinned: window.isAlwaysOnTop(),
+        maximized: window.isMaximized(),
+        expandedSize: expandedMiniSize,
+        ...miniState,
+      })
+    } catch {}
+  }
+  for (const event of ['move', 'resize', 'always-on-top-changed'])
+    window.on(event, () => {
+      clearTimeout(timer)
+      timer = setTimeout(capture, 200)
+    })
+  window.on('show', capture)
+  window.on('close', capture)
+  window.on('closed', () => clearTimeout(timer))
+}
+function constrainWindows() {
+  for (const window of [mainWindow, miniWindow]) {
+    if (!window || window.isDestroyed() || window.isMinimized()) continue
+    const area = windowArea(window.getBounds())
+    window.setMinimumSize(
+      Math.min(window === mainWindow ? 850 : 72, area.width),
+      Math.min(window === mainWindow ? 620 : 260, area.height),
+    )
+    if (!window.isMaximized()) window.setBounds(constrainBounds(window.getBounds(), area))
+  }
+}
 function createMain() {
-  const area = screen.getPrimaryDisplay().workArea
+  const saved = desktopState.snapshot().windowState.workspace
+  const area = windowArea(saved?.bounds)
   mainWindow = new BrowserWindow({
     width: Math.min(1440, area.width - 60),
     height: Math.min(980, area.height - 60),
-    minWidth: 850,
-    minHeight: 620,
+    ...(saved?.bounds ? constrainBounds(saved.bounds, area) : {}),
+    minWidth: Math.min(850, area.width),
+    minHeight: Math.min(620, area.height),
+    alwaysOnTop: saved?.pinned === true,
     backgroundColor: '#f9faf9',
     title: 'Pulse',
     icon: iconPath,
@@ -296,11 +390,12 @@ function createMain() {
     },
   })
   secureWindow(mainWindow)
+  trackWindow(mainWindow, 'workspace')
   mainWindow.once('ready-to-show', () => {
-    if (windowMode === 'workspace') mainWindow.show()
-  })
-  mainWindow.on('minimize', () => {
-    if (!quitting && windowMode !== 'mini') showMini()
+    if (windowMode === 'workspace') {
+      if (saved?.maximized) mainWindow.maximize()
+      mainWindow.show()
+    } else showMini()
   })
   mainWindow.on('close', (event) => {
     if (!quitting && tray) {
@@ -374,16 +469,19 @@ function updateMiniState(nextState) {
 
 function showMini() {
   windowMode = 'mini'
+  const saved = desktopState.snapshot().windowState.mini
   const existing = miniWindow && !miniWindow.isDestroyed()
   const area = existing
     ? screen.getDisplayMatching(
         miniWindow.isMinimized() ? miniWindow.getNormalBounds() : miniWindow.getBounds(),
       ).workArea
-    : mainWindow && !mainWindow.isDestroyed()
-      ? screen.getDisplayMatching(
-          mainWindow.isMinimized() ? mainWindow.getNormalBounds() : mainWindow.getBounds(),
-        ).workArea
-      : screen.getPrimaryDisplay().workArea
+    : saved?.bounds
+      ? windowArea(saved.bounds)
+      : mainWindow && !mainWindow.isDestroyed()
+        ? screen.getDisplayMatching(
+            mainWindow.isMinimized() ? mainWindow.getNormalBounds() : mainWindow.getBounds(),
+          ).workArea
+        : screen.getPrimaryDisplay().workArea
   const reveal = () => {
     if (windowMode !== 'mini') return
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -392,7 +490,7 @@ function showMini() {
     }
     miniWindow.setSkipTaskbar(false)
     if (miniWindow.isMinimized()) miniWindow.restore()
-    if (!existing) alignMini(area, area.y + 16)
+    if (!existing && !saved?.bounds) alignMini(area, area.y + 16)
     else {
       const bounds = miniWindow.getBounds()
       const horizontal = Math.max(area.x, Math.min(bounds.x, area.x + area.width - bounds.width))
@@ -418,8 +516,9 @@ function showMini() {
     fullscreenable: false,
     x: area.x + area.width - 372,
     y: area.y + 16,
+    ...(saved?.bounds ? constrainBounds(saved.bounds, area) : {}),
     frame: false,
-    alwaysOnTop: true,
+    alwaysOnTop: saved ? saved.pinned === true : true,
     backgroundColor: '#fbfcfb',
     title: 'Pulse - Mini Monitor',
     icon: iconPath,
@@ -433,6 +532,7 @@ function showMini() {
     },
   })
   secureWindow(miniWindow)
+  trackWindow(miniWindow, 'mini')
   miniWindow.once('ready-to-show', () => {
     miniReady = true
     reveal()
@@ -538,6 +638,79 @@ ipcMain.handle('pulse:set-session-source', (event, source) => {
 ipcMain.handle('pulse:refresh-sessions', (event) => {
   trustedWindow(event)
   return refreshFeed(true)
+})
+function desktopSettings() {
+  return { ...desktopState.snapshot(), activeSources, hooks: claudeHooks.status() }
+}
+function readState() {
+  const { revision, seenReplies } = desktopState.snapshot()
+  return { revision, seenReplies }
+}
+function publishReadState() {
+  const value = readState()
+  for (const window of windows) window.webContents.send('pulse:read-state', value)
+  return value
+}
+ipcMain.handle('pulse:sync-read-state', (event, legacy) => {
+  trustedWindow(event)
+  desktopState.importReadMarkers(legacy)
+  return publishReadState()
+})
+ipcMain.handle('pulse:mark-read', (event, reference) => {
+  trustedWindow(event)
+  const current = liveSources.sessions().find((item) => item.id === reference?.sessionId)
+  if (!matchesReference(current, reference) || current.status !== 'completed')
+    throw new Error('This reply has changed. Select the current reply.')
+  desktopState.markRead(
+    current.id,
+    JSON.stringify([current.requestId ?? null, current.finishedAt ?? current.updatedAt]),
+  )
+  return publishReadState()
+})
+ipcMain.handle('pulse:set-hooks', async (event, enabled) => {
+  trustedWindow(event)
+  await claudeHooks.enable(enabled)
+  void refreshFeed(true)
+  return desktopSettings()
+})
+ipcMain.handle('pulse:copy-hooks', (event) => {
+  trustedWindow(event)
+  clipboard.writeText(JSON.stringify(claudeHooks.configuration(), null, 2))
+})
+ipcMain.handle('pulse:get-desktop-settings', (event) => {
+  trustedWindow(event)
+  return desktopSettings()
+})
+ipcMain.handle('pulse:save-sources', (event, value) => {
+  trustedWindow(event)
+  desktopState.setSources(value)
+  return desktopSettings()
+})
+ipcMain.handle('pulse:browse-source', async (event, key) => {
+  const owner = trustedWindow(event)
+  if (!['vscodeStorage', 'claudeExecutable'].includes(key)) throw new TypeError('Unknown source.')
+  const result = await dialog.showOpenDialog(owner, {
+    properties: [key === 'vscodeStorage' ? 'openDirectory' : 'openFile'],
+  })
+  return result.canceled ? null : result.filePaths[0]
+})
+ipcMain.handle('pulse:check-sources', async (event, value) => {
+  trustedWindow(event)
+  const paths = validateSources(value)
+  const adapters = {
+    vscode: createVSCodeSource(paths.vscodeStorage || sourceDefaults.vscodeStorage),
+    claude: makeClaudeSource(paths.claudeExecutable || sourceDefaults.claudeExecutable, false),
+  }
+  try {
+    return await Promise.all(
+      Object.entries(adapters).map(async ([id, adapter]) => {
+        const result = await adapter.scan(Date.now(), { force: true })
+        return { id, state: result.state, message: result.message, count: result.sessions.length }
+      }),
+    )
+  } finally {
+    for (const adapter of Object.values(adapters)) adapter.close()
+  }
 })
 async function openSessionDetails(id, expected) {
   if (typeof id !== 'string' || !liveSources.sessions().some((item) => item.id === id))
@@ -655,7 +828,10 @@ function createTray() {
 if (!testMode && !app.requestSingleInstanceLock()) app.quit()
 else {
   app.on('second-instance', () => restoreWindow())
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    await claudeHooks.start().catch(() => {})
+    screen.on('display-removed', constrainWindows)
+    screen.on('display-metrics-changed', constrainWindows)
     alertHistory = createAlertHistory(
       path.join(app.getPath('userData'), 'reminder-history.json'),
       alertTracker,
@@ -664,11 +840,14 @@ else {
     powerMonitor.on('suspend', () => {
       initializedSources.clear()
       alertTracker.beginRecovery()
+      claudeSource.beginRecovery()
     })
     powerMonitor.on('resume', () => {
       initializedSources.clear()
       alertTracker.beginRecovery()
+      claudeSource.beginRecovery()
       void refreshFeed(true)
+      constrainWindows()
     })
     try {
       const saved = JSON.parse(
@@ -705,6 +884,7 @@ else {
   app.on('activate', () => restoreWindow())
   app.on('before-quit', () => {
     persistAlertHistory()
+    claudeHooks.close()
     quitting = true
     clearInterval(feedTimer)
     liveSources.close()

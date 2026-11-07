@@ -21,6 +21,7 @@ export interface Session {
   host?: SessionHost
   statusDetail?: string
   requestId?: string
+  observationId?: string
   requestStartedAt?: number
   archivedAt?: number
   status: SessionStatus
@@ -34,6 +35,7 @@ export interface Session {
 export interface SessionReference {
   sessionId: string
   requestId: string | null
+  observationId?: string
   status: SessionStatus
   finishedAt: number | null
   updatedAt: number
@@ -44,6 +46,7 @@ export function referenceForSession(session: Session): SessionReference {
   return {
     sessionId: session.id,
     requestId: session.requestId ?? null,
+    ...(session.observationId ? { observationId: session.observationId } : {}),
     status: session.status,
     finishedAt: session.finishedAt,
     updatedAt: session.updatedAt,
@@ -285,7 +288,7 @@ export function filterSessions(
   const needle = query.trim().toLowerCase()
   return sessions.filter((session) => {
     const matchesText =
-      `${session.project} ${session.task} ${session.branch} ${providers[session.provider].name}`
+      `${session.id} ${session.requestId ?? ''} ${session.project} ${session.task} ${session.branch} ${providers[session.provider].name}`
         .toLowerCase()
         .includes(needle)
     const matchesStatus =

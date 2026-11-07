@@ -9,7 +9,9 @@ import {
   BellRing,
   Check,
   CheckCheck,
+  Copy,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   ChevronUp,
   CircleCheck,
@@ -59,6 +61,7 @@ import {
   parseSessions,
   providers,
   replyMarker,
+  referenceForSession,
   relativeTime,
   serializeSessions,
   sessionDuration,
@@ -73,6 +76,132 @@ const SETTINGS_KEY = 'pulse.preferences.v1'
 const SEEN_KEY = 'pulse.seen-replies.v1'
 const desktop = window.pulse
 const miniMode = new URLSearchParams(window.location.search).get('view') === 'mini'
+
+function SourceSettings({ hooks }: { hooks?: PulseDesktopSettings['hooks'] | null }) {
+  const [settings, setSettings] = useState<PulseDesktopSettings | null>(null)
+  const [paths, setPaths] = useState<PulseSourcePaths>({ vscodeStorage: '', claudeExecutable: '' })
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  useEffect(() => {
+    let active = true
+    void desktop
+      ?.getDesktopSettings()
+      .then((value) => {
+        if (active) {
+          setSettings(value)
+          setPaths(value.sources)
+          setMessage(value.warning ?? '')
+        }
+      })
+      .catch(() => {
+        if (active) setMessage('Could not load source settings.')
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+  async function act(action: 'save' | 'check' | keyof PulseSourcePaths) {
+    if (!desktop) return
+    setBusy(true)
+    try {
+      if (action === 'save') {
+        setSettings(await desktop.saveSources(paths))
+        setMessage('Saved. Restart Pulse to apply source paths.')
+      } else if (action === 'check') {
+        const results = await desktop.checkSources(paths)
+        setMessage(
+          results
+            .map((result) => `${result.id}: ${result.state} (${result.count}). ${result.message}`)
+            .join('\n'),
+        )
+      } else {
+        const selected = await desktop.browseSource(action)
+        if (selected) setPaths((current) => ({ ...current, [action]: selected }))
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Source operation failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <fieldset className="source-settings" disabled={busy || !settings}>
+      <legend>Source paths</legend>
+      {(['vscodeStorage', 'claudeExecutable'] as const).map((key) => (
+        <label key={key}>
+          <span>{key === 'vscodeStorage' ? 'VS Code workspace storage' : 'Claude executable'}</span>
+          <div className="source-path-input">
+            <input
+              aria-label={
+                key === 'vscodeStorage' ? 'VS Code workspace storage' : 'Claude executable'
+              }
+              value={paths[key]}
+              placeholder={settings?.activeSources[key]}
+              onChange={(event) =>
+                setPaths((current) => ({ ...current, [key]: event.target.value }))
+              }
+            />
+            <IconButton
+              label={`Browse ${key === 'vscodeStorage' ? 'VS Code storage' : 'Claude executable'}`}
+              onClick={() => void act(key)}
+            >
+              <Folder size={16} />
+            </IconButton>
+          </div>
+          <small>Active: {settings?.activeSources[key] ?? '-'}</small>
+        </label>
+      ))}
+      <div className="source-settings-actions">
+        <button className="button button-secondary" onClick={() => void act('check')}>
+          <RotateCcw size={14} />
+          Test connections
+        </button>
+        <button className="button button-primary" onClick={() => void act('save')}>
+          <Check size={14} />
+          Save paths
+        </button>
+      </div>
+      <div className="setting-row">
+        <strong>Claude local hooks</strong>
+        <Toggle
+          label="Claude local hooks"
+          checked={settings?.hooks.enabled ?? false}
+          onChange={(enabled) => {
+            setBusy(true)
+            void desktop
+              ?.setHooks(enabled)
+              .then(setSettings)
+              .catch(() => setMessage('Could not change hook listener.'))
+              .finally(() => setBusy(false))
+          }}
+        />
+        <IconButton
+          label="Copy Claude hook configuration"
+          disabled={!settings?.hooks.listening}
+          onClick={() => {
+            void desktop
+              ?.copyHooks()
+              .then(() =>
+                setMessage('Hook configuration copied. Existing Claude settings were not changed.'),
+              )
+              .catch(() => setMessage('Could not copy hook configuration.'))
+          }}
+        >
+          <Copy size={15} />
+        </IconButton>
+      </div>
+      {settings?.hooks && (
+        <small>
+          {(hooks ?? settings.hooks).warning ??
+            ((hooks ?? settings.hooks).listening
+              ? `Listening on localhost. Last event: ${(hooks ?? settings.hooks).lastEventAt ? new Date((hooks ?? settings.hooks).lastEventAt!).toLocaleString() : 'None'}`
+              : 'Disabled')}
+        </small>
+      )}
+      {message && <p role="status">{message}</p>}
+    </fieldset>
+  )
+}
 
 let storageFailed = false
 const storageListeners = new Set<() => void>()
@@ -391,6 +520,8 @@ function Workspace() {
   const [filter, setFilter] = useState<SessionFilter>('all')
   const [provider, setProvider] = useState<Provider | 'all'>('all')
   const [query, setQuery] = useState('')
+  const [pageState, setPageState] = useState({ key: '', page: 0 })
+  const [miniPage, setMiniPage] = useState(0)
   const [collection, setCollection] = useState<'active' | 'archived' | 'all'>('active')
   const [view, setView] = useState<'sessions' | 'activity'>('sessions')
   const [layout, setLayout] = useState<'grid' | 'list'>('grid')
@@ -404,6 +535,27 @@ function Workspace() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [simulatingId, setSimulatingId] = useState<string | null>(null)
   const [seenReplies, setSeenReplies] = useState(initialSeen)
+  useEffect(() => {
+    if (!desktop) return
+    let revision = -1
+    let active = true
+    const receive = (value: { revision: number; seenReplies: Record<string, string | number> }) => {
+      if (!active || value.revision < revision) return
+      revision = value.revision
+      setSeenReplies((current) => ({
+        ...Object.fromEntries(
+          Object.entries(current).filter(([id]) => !/^(vscode|claude):/.test(id)),
+        ),
+        ...value.seenReplies,
+      }))
+    }
+    const stop = desktop.onReadState(receive)
+    void desktop.syncReadState(initialSeen()).then(receive).catch(reportStorageFailure)
+    return () => {
+      active = false
+      stop()
+    }
+  }, [])
   const [alerts, setAlerts] = useState<PulseAlertState>({
     items: [],
     revision: -1,
@@ -551,10 +703,15 @@ function Workspace() {
     setOpeningAlertId(alert.id)
     setAlertError(null)
     try {
-      const result = await desktop.openSession(alert.sessionId, {
-        ...alert.reference,
-        alertId: alert.id,
-      })
+      const result = await desktop.openSession(
+        alert.sessionId,
+        alert.recovered
+          ? undefined
+          : {
+              ...alert.reference,
+              alertId: alert.id,
+            },
+      )
       if (result.mode === 'stale')
         setAlertError({
           id: alert.id,
@@ -650,7 +807,15 @@ function Workspace() {
         if (incoming) receiveSessions(incoming)
       }
       if (event.key === SETTINGS_KEY) setPreferences(initialPreferences())
-      if (event.key === SEEN_KEY) setSeenReplies(initialSeen())
+      if (event.key === SEEN_KEY)
+        setSeenReplies((current) => ({
+          ...initialSeen(),
+          ...(desktop
+            ? Object.fromEntries(
+                Object.entries(current).filter(([id]) => /^(vscode|claude):/.test(id)),
+              )
+            : {}),
+        }))
     }
     window.addEventListener('storage', receive)
     return () => window.removeEventListener('storage', receive)
@@ -720,12 +885,13 @@ function Workspace() {
     ['waiting', 'failed', 'disconnected', 'unknown'].includes(session.status),
   )
   const completed = sessions.filter((session) => session.status === 'completed')
-  const ready = completed.filter(
+  const unreadReplies = completed.filter(
     (session) =>
-      live &&
       seenReplies[session.id] !== replyMarker(session) &&
       seenReplies[session.id] !== (session.finishedAt ?? session.updatedAt),
   )
+  const unreadReplyIds = new Set(unreadReplies.map((session) => session.id))
+  const ready = live ? unreadReplies : []
   const visible = filterSessions(sessions, query, filter, provider).filter(
     (session) =>
       (!live ||
@@ -735,13 +901,43 @@ function Workspace() {
   )
   const miniSessions = sessions.filter(
     (session) =>
-      !session.archivedAt ||
-      ['running', 'waiting', 'failed', 'unknown'].includes(session.status) ||
-      ready.some((item) => item.id === session.id),
+      (!session.archivedAt ||
+        ['running', 'waiting', 'failed', 'unknown'].includes(session.status) ||
+        unreadReplyIds.has(session.id)) &&
+      (session.status !== 'completed' || unreadReplyIds.has(session.id)),
   )
   const allEvents = sessions
     .flatMap((session) => session.events.map((event) => ({ ...event, session })))
     .sort((first, second) => second.at - first.at)
+
+  const pageKey = JSON.stringify([query, filter, provider, collection, preferences.showCompleted])
+  const pages = Math.max(1, Math.ceil(visible.length / 50))
+  const pageIndex = pageState.key === pageKey ? Math.min(pageState.page, pages - 1) : 0
+  const pageSessions = visible.slice(pageIndex * 50, (pageIndex + 1) * 50)
+  const miniPages = Math.max(1, Math.ceil(miniSessions.length / 50))
+  const miniIndex = Math.min(miniPage, miniPages - 1)
+  const miniPageSessions = miniSessions.slice(miniIndex * 50, (miniIndex + 1) * 50)
+  const miniPagination = miniPages > 1 && (
+    <nav className="mini-pagination" aria-label="Mini pages">
+      <IconButton
+        label="Previous mini page"
+        disabled={miniIndex === 0}
+        onClick={() => setMiniPage(miniIndex - 1)}
+      >
+        <ChevronLeft size={14} />
+      </IconButton>
+      <span>
+        {miniIndex + 1}/{miniPages}
+      </span>
+      <IconButton
+        label="Next mini page"
+        disabled={miniIndex === miniPages - 1}
+        onClick={() => setMiniPage(miniIndex + 1)}
+      >
+        <ChevronRight size={14} />
+      </IconButton>
+    </nav>
+  )
 
   async function togglePin() {
     if (!desktop) return
@@ -959,22 +1155,21 @@ function Workspace() {
           </span>
         </div>
         <nav className="rail-sessions" aria-label="Session shortcuts">
-          {miniSessions
-            .filter((item) => preferences.showCompleted || item.status !== 'completed')
-            .map((item) => (
-              <button
-                key={item.id}
-                className={`rail-session mini-${item.status}`}
-                title={`${item.project}\n${item.task}\n${sessionHostLabel(item)}\n${statusLabels[item.status]}`}
-                aria-label={`Open ${item.project}: ${item.task}`}
-                onClick={() => openWorkspace(item.id)}
-              >
-                <ProviderIcon provider={item.provider} size={18} />
-                <span className={`rail-status rail-status-${item.status}`} />
-                <span className="rail-session-name">{item.project}</span>
-              </button>
-            ))}
+          {miniPageSessions.map((item) => (
+            <button
+              key={item.id}
+              className={`rail-session mini-${item.status}`}
+              title={`${item.project}\n${item.task}\n${sessionHostLabel(item)}\n${statusLabels[item.status]}`}
+              aria-label={`Open ${item.project}: ${item.task}`}
+              onClick={() => openWorkspace(item.id)}
+            >
+              <ProviderIcon provider={item.provider} size={18} />
+              <span className={`rail-status rail-status-${item.status}`} />
+              <span className="rail-session-name">{item.project}</span>
+            </button>
+          ))}
         </nav>
+        {miniPagination}
         <footer className="rail-footer">
           {toast?.sessionId && (
             <IconButton
@@ -1076,41 +1271,40 @@ function Workspace() {
               {feed.message}
             </p>
           )}
-          {miniSessions
-            .filter((session) => preferences.showCompleted || session.status !== 'completed')
-            .map((session) => (
-              <button
-                key={session.id}
-                className={`mini-session mini-${session.status}`}
-                title={`${session.project}\n${session.task}\n${sessionHostLabel(session)}\nView session in Pulse`}
-                onClick={() => openWorkspace(session.id)}
-              >
-                <span className="mini-provider">
-                  <ProviderIcon provider={session.provider} size={20} />
+          {miniPageSessions.map((session) => (
+            <button
+              key={session.id}
+              className={`mini-session mini-${session.status}`}
+              title={`${session.project}\n${session.task}\n${sessionHostLabel(session)}\nView session in Pulse`}
+              onClick={() => openWorkspace(session.id)}
+            >
+              <span className="mini-provider">
+                <ProviderIcon provider={session.provider} size={20} />
+              </span>
+              <span className="mini-session-content">
+                <strong className="mini-session-title">{session.project}</strong>
+                <span className="mini-session-subtitle" title={session.task}>
+                  {session.task}
                 </span>
-                <span className="mini-session-content">
-                  <strong className="mini-session-title">{session.project}</strong>
-                  <span className="mini-session-subtitle" title={session.task}>
-                    {session.task}
-                  </span>
-                  <StatusBadge status={session.status} />
-                  {live && <span className="mini-progress">{session.events.at(-1)?.text}</span>}
+                <StatusBadge status={session.status} />
+                {live && <span className="mini-progress">{session.events.at(-1)?.text}</span>}
+              </span>
+              <span className="mini-session-end">
+                <span
+                  title={
+                    session.status === 'running'
+                      ? 'Current request elapsed time'
+                      : 'Time since last activity'
+                  }
+                >
+                  {sessionDuration(session, now)}
                 </span>
-                <span className="mini-session-end">
-                  <span
-                    title={
-                      session.status === 'running'
-                        ? 'Current request elapsed time'
-                        : 'Time since last activity'
-                    }
-                  >
-                    {sessionDuration(session, now)}
-                  </span>
-                  <ArrowUpRight size={13} />
-                </span>
-              </button>
-            ))}
+                <ArrowUpRight size={13} />
+              </span>
+            </button>
+          ))}
         </div>
+        {miniPagination}
         <footer className="mini-footer">
           <button
             onClick={() => void toggleDock()}
@@ -1501,7 +1695,7 @@ function Workspace() {
                   </div>
                 </div>
                 <div className={`session-grid ${layout === 'list' ? 'list-layout' : ''}`}>
-                  {visible.map((session, index) => (
+                  {pageSessions.map((session, index) => (
                     <SessionCard
                       key={session.id}
                       session={session}
@@ -1532,8 +1726,29 @@ function Workspace() {
                 )}
                 <div className="list-footer">
                   <span>
-                    {visible.length} of {sessions.length} sessions
+                    {visible.length} matching / {sessions.length} monitored
                   </span>
+                  {pages > 1 && (
+                    <nav className="mini-pagination" aria-label="Session pages">
+                      <IconButton
+                        label="Previous session page"
+                        disabled={pageIndex === 0}
+                        onClick={() => setPageState({ key: pageKey, page: pageIndex - 1 })}
+                      >
+                        <ChevronLeft size={14} />
+                      </IconButton>
+                      <span>
+                        Page {pageIndex + 1} of {pages}
+                      </span>
+                      <IconButton
+                        label="Next session page"
+                        disabled={pageIndex === pages - 1}
+                        onClick={() => setPageState({ key: pageKey, page: pageIndex + 1 })}
+                      >
+                        <ChevronRight size={14} />
+                      </IconButton>
+                    </nav>
+                  )}
                   <span>
                     <ShieldCheck size={12} />
                     {live
@@ -1653,6 +1868,32 @@ function Workspace() {
                   )}
                   <SessionTimeline key={selected.id} session={selected} />
                   <div className="inspector-footer">
+                    {selected.status === 'completed' && (
+                      <button
+                        className="button button-secondary open-session-button"
+                        disabled={!unreadReplyIds.has(selected.id)}
+                        onClick={() => {
+                          if (desktop && selected.source) {
+                            void desktop.markRead(referenceForSession(selected)).catch(() =>
+                              setToast({
+                                title: 'Reply could not be marked read',
+                                detail: 'The request changed or the state could not be saved.',
+                                tone: 'info',
+                              }),
+                            )
+                          } else
+                            setSeenReplies((current) => ({
+                              ...current,
+                              [selected.id]: replyMarker(selected),
+                            }))
+                        }}
+                      >
+                        <CheckCheck size={15} />
+                        {unreadReplyIds.has(selected.id)
+                          ? 'Mark reply as read'
+                          : 'Reply marked as read'}
+                      </button>
+                    )}
                     {live && (
                       <button
                         className="button button-secondary open-session-button"
@@ -1867,6 +2108,9 @@ function Workspace() {
                       <RotateCcw size={14} />
                     </IconButton>
                   </div>
+                  <SourceSettings
+                    hooks={feed.sources.find((source) => source.id === 'claude')?.hooks}
+                  />
                   {feed.sources.map((source) => (
                     <div className="source-connection" key={source.id}>
                       <strong>{source.name}</strong>
@@ -1886,9 +2130,25 @@ function Workspace() {
                           </dd>
                         </div>
                         <div>
+                          <dt>Last success</dt>
+                          <dd>
+                            {source.lastSuccessAt == null
+                              ? '-'
+                              : relativeTime(source.lastSuccessAt, now)}
+                          </dd>
+                        </div>
+                        <div>
                           <dt>Scan time</dt>
                           <dd>{source.durationMs === null ? '-' : `${source.durationMs} ms`}</dd>
                         </div>
+                        {source.metrics && (
+                          <div>
+                            <dt>Checked / discovered</dt>
+                            <dd>
+                              {source.metrics.checked} / {source.metrics.discovered}
+                            </dd>
+                          </div>
+                        )}
                       </dl>
                       {['error', 'unavailable'].includes(source.state) && (
                         <p role="status">{source.message}</p>
@@ -1897,6 +2157,9 @@ function Workspace() {
                   ))}
                 </section>
               )}
+              <p className="retention-limits" title="Oldest entries are evicted first">
+                Retention: 200 reminders / 1000 baselines / 5000 read markers / 1000 hook sessions
+              </p>
               <div className="integration-status">
                 <Monitor size={18} />
                 <div>
@@ -1944,7 +2207,7 @@ function Workspace() {
                         <div className="pending-alert-row" key={alert.id}>
                           <button
                             className="notification-item"
-                            aria-label={`Open ${alert.project}: ${alert.task}`}
+                            aria-label={`${alert.recovered ? 'View current session:' : 'Open'} ${alert.project}: ${alert.task}`}
                             disabled={!!openingAlertId}
                             onClick={() => void openPendingAlert(alert)}
                           >
@@ -1967,6 +2230,12 @@ function Workspace() {
                                 {statusLabels[alert.status]}
                               </span>
                               <span>{relativeTime(alert.at, now)}</span>
+                              {alert.recovered && (
+                                <span>
+                                  Previous reminder. Original request not verified. View current
+                                  session.
+                                </span>
+                              )}
                             </span>
                             <ArrowUpRight size={14} />
                           </button>

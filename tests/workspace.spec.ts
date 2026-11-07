@@ -41,6 +41,60 @@ test('search, agent and status filters compose; layout and empty state work', as
   await expect(page.locator('.session-grid')).not.toHaveClass(/list-layout/)
 })
 
+test('source order and ID search keep global monitoring counts intact', async ({ page }) => {
+  const tasks = createDemoSessions().map((session) => session.task)
+  await expect(page.getByRole('combobox', { name: 'Session order' })).toHaveCount(0)
+  await expect(page.locator('.session-card h3')).toHaveText(tasks)
+  const opened = page.waitForEvent('popup')
+  await page.getByRole('button', { name: 'Mini monitor', exact: true }).click()
+  const mini = await opened
+  await expect(mini.locator('.mini-session-subtitle')).toHaveText(tasks)
+  await page.getByRole('textbox', { name: 'Search sessions' }).fill('014')
+  await expect(page.locator('.session-card')).toHaveCount(1)
+  await expect(page.getByText('1 matching / 6 monitored', { exact: true })).toBeVisible()
+  await expect(mini.locator('.mini-session-subtitle')).toHaveText(tasks)
+})
+
+test('pagination bounds rendered sessions while search covers the entire collection', async ({
+  page,
+}) => {
+  const sample = createDemoSessions()[0]
+  const sessions = Array.from({ length: 100 }, (_, index) => ({
+    ...sample,
+    id: `scale-${index}`,
+    task: `Scale task ${index}`,
+    updatedAt: sample.updatedAt + index,
+  }))
+  await page.addInitScript(
+    (data) =>
+      localStorage.setItem(
+        'pulse.demo.sessions.v1',
+        JSON.stringify({ version: 1, sessions: data }),
+      ),
+    sessions,
+  )
+  const start = Date.now()
+  await page.reload()
+  await expect(page.locator('.session-card')).toHaveCount(50)
+  console.log(
+    `100 sessions: first 50 cards rendered in ${Date.now() - start} ms including page load`,
+  )
+  await expect(page.getByText('100 matching / 100 monitored', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Next session page', exact: true }).click()
+  await expect(page.getByText('Page 2 of 2', { exact: true })).toBeVisible()
+  await expect(page.locator('.session-card')).toHaveCount(50)
+  await page.getByRole('textbox', { name: 'Search sessions' }).fill('scale-99')
+  await expect(page.locator('.session-card')).toHaveCount(1)
+  await expect(page.locator('.session-card')).toContainText('Scale task 99')
+  const opened = page.waitForEvent('popup')
+  await page.getByRole('button', { name: 'Mini monitor', exact: true }).click()
+  const mini = await opened
+  await expect(mini.locator('.mini-session')).toHaveCount(50)
+  await mini.getByRole('button', { name: 'Next mini page', exact: true }).click()
+  await expect(mini.getByRole('navigation', { name: 'Mini pages' })).toContainText('2/2')
+  await expect(mini.locator('.mini-session')).toHaveCount(50)
+})
+
 test('approval resumes a sample session, then completes and notifies', async ({ page }) => {
   await page.clock.install()
   await page.getByRole('button', { name: 'design-system: Update the color primitives' }).click()
@@ -142,6 +196,65 @@ test('mini monitor synchronizes and returns to a selected session', async ({ pag
     .getByRole('button', { name: 'Open atlas-api: Add authentication middleware', exact: true })
     .click()
   await expect(page.locator('.inspector h2')).toHaveText('Add authentication middleware')
+})
+
+test('mini retains unread replies independently of workspace history and read state follows the reply', async ({
+  page,
+}) => {
+  const completed = createDemoSessions().find((session) => session.status === 'completed')!
+  const popup = page.waitForEvent('popup')
+  await page.getByRole('button', { name: 'Mini monitor', exact: true }).click()
+  const mini = await popup
+  await mini.setViewportSize({ width: 360, height: 600 })
+  await expect(mini.locator('.mini-completed')).toHaveCount(2)
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('switch', { name: 'Show Rely Ready sessions' }).click()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.session-card')).toHaveCount(4)
+  await expect(mini.locator('.mini-completed')).toHaveCount(2)
+  await page.getByRole('textbox', { name: 'Search sessions' }).fill('not-a-session')
+  await expect(page.locator('.session-card')).toHaveCount(0)
+  await expect(mini.locator('.mini-session')).toHaveCount(6)
+  await mini.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
+  await expect(mini.locator('.rail-session.mini-completed')).toHaveCount(2)
+  await page.getByRole('button', { name: 'Notifications', exact: true }).click()
+  await page
+    .locator('.notification-item')
+    .filter({ hasText: completed.project })
+    .filter({ hasText: 'Rely Ready' })
+    .click()
+  await expect(page.locator('.inspector h2')).toHaveText(completed.task)
+  await expect(mini.locator('.rail-session.mini-completed')).toHaveCount(2)
+  await page.getByRole('button', { name: 'Mark reply as read', exact: true }).click()
+  await expect(
+    page.getByRole('button', { name: 'Reply marked as read', exact: true }),
+  ).toBeDisabled()
+  await expect(mini.locator('.rail-session.mini-completed')).toHaveCount(1)
+  await mini.getByRole('button', { name: 'Expand sidebar', exact: true }).click()
+  await expect(mini.locator('.mini-completed')).toHaveCount(1)
+  mkdirSync('.artifacts', { recursive: true })
+  await page.screenshot({ path: '.artifacts/g23-read-desktop.png', animations: 'disabled' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page
+    .getByRole('button', { name: 'Reply marked as read', exact: true })
+    .scrollIntoViewIfNeeded()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: '.artifacts/g23-read-mobile.png', animations: 'disabled' })
+  await page.reload()
+  await expect(mini.locator('.mini-completed')).toHaveCount(1)
+  await page.evaluate((id) => {
+    const saved = JSON.parse(localStorage.getItem('pulse.demo.sessions.v1')!)
+    const session = saved.sessions.find((item: { id: string }) => item.id === id)
+    session.requestId = 'new-reply-after-read'
+    const value = JSON.stringify(saved)
+    localStorage.setItem('pulse.demo.sessions.v1', value)
+    window.dispatchEvent(
+      new StorageEvent('storage', { key: 'pulse.demo.sessions.v1', newValue: value }),
+    )
+  }, completed.id)
+  await expect(mini.locator('.mini-completed')).toHaveCount(2)
+  await expect(mini.locator('.mini-waiting')).toHaveCount(1)
+  await expect(mini.locator('.mini-running')).toHaveCount(2)
 })
 
 test('detail timeline previews recent events and expands without affecting other sessions', async ({

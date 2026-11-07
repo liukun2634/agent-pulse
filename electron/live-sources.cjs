@@ -51,7 +51,13 @@ function createLiveSources(adapters, onUpdate) {
         }
       }
       if (!closed) {
-        snapshots.set(source, { ...snapshot, durationMs: Math.round(performance.now() - started) })
+        snapshots.set(source, {
+          ...snapshot,
+          lastSuccessAt: ['connected', 'empty'].includes(snapshot.state)
+            ? snapshot.scannedAt
+            : (snapshots.get(source).lastSuccessAt ?? null),
+          durationMs: Math.round(performance.now() - started),
+        })
         if (snapshot.needsRefresh) queued.add(source)
         onUpdate(source)
       }
@@ -92,9 +98,13 @@ function createLiveSources(adapters, onUpdate) {
         state: snapshot.state,
         message: snapshot.message,
         scannedAt: snapshot.scannedAt,
+        lastSuccessAt: snapshot.lastSuccessAt ?? null,
+        metrics: snapshot.metrics ?? null,
+        hooks: snapshot.hookStatus ?? null,
         durationMs: snapshot.durationMs ?? null,
         acquisition:
-          snapshot.source === 'vscode' ? 'File events + 2s fallback' : 'CLI snapshots every 2s',
+          snapshot.acquisition ??
+          (snapshot.source === 'vscode' ? 'File events + 2s fallback' : 'CLI snapshots every 2s'),
       })),
       scannedAt: checked.length ? Math.max(...checked) : null,
     }

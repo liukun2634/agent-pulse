@@ -266,6 +266,174 @@ test('source discovers workspaces, tails partial UTF-8 lines and handles truncat
   }
 })
 
+test('current monitored sessions retain alert baselines beyond the history retention limit', () => {
+  const tracker = createAlertTracker()
+  const sessions = Array.from({ length: 1001 }, (_, index) => ({
+    id: `vscode:large:${index}`,
+    source: 'vscode',
+    project: 'project',
+    task: `Input ${index}`,
+    status: 'waiting',
+    requestId: `request-${index}`,
+    updatedAt: now,
+  }))
+  assert.equal(tracker.update(sessions, now).length, 1001)
+  assert.deepEqual(tracker.update(sessions, now + 2000), [])
+  assert.equal(tracker.snapshot().observed.length, 1000)
+  const restored = createAlertTracker()
+  restored.restore(tracker.snapshot())
+  assert.ok(restored.update(sessions, now + 4000).every((alert) => alert.initial))
+  assert.deepEqual(restored.update(sessions, now + 6000), [])
+})
+
+test('large directory scan measures cold and warm cost without cutting monitoring', async (context) => {
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'pulse-scale-'))
+  const workspace = path.join(root, 'workspace')
+  const transcripts = path.join(workspace, 'GitHub.copilot-chat', 'transcripts')
+  const source = createVSCodeSource(root, {
+    watchChanges: () => {
+      throw new Error('No watcher')
+    },
+  })
+  try {
+    await fs.mkdir(transcripts, { recursive: true })
+    await fs.writeFile(
+      path.join(workspace, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL(root).href }),
+    )
+    await Promise.all(
+      Array.from({ length: 500 }, (_, index) =>
+        fs.writeFile(
+          path.join(transcripts, `session-${index}.jsonl`),
+          JSON.stringify({
+            type: 'user.message',
+            timestamp: new Date(now).toISOString(),
+            data: { content: `Synthetic ${index}` },
+          }) + '\n',
+        ),
+      ),
+    )
+    const memory = process.memoryUsage().heapUsed
+    const start = performance.now()
+    const cold = await source.scan(now)
+    const coldMs = performance.now() - start
+    const warmStart = performance.now()
+    const warm = await source.scan(now + 1)
+    assert.equal(cold.sessions.length, 500)
+    assert.equal(cold.metrics.checked, 500)
+    assert.equal(warm.metrics.checked, 0)
+    assert.equal(warm.sessions.length, 500)
+    context.diagnostic(
+      `500 records: cold ${coldMs.toFixed(1)} ms, warm ${(performance.now() - warmStart).toFixed(1)} ms, heap delta ${((process.memoryUsage().heapUsed - memory) / 1048576).toFixed(2)} MiB`,
+    )
+  } finally {
+    source.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('active sessions beyond 100 records remain monitored including saved-only updates', async () => {
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'pulse-many-sessions-'))
+  const source = createVSCodeSource(root, {
+    watchChanges: () => {
+      throw new Error('No watcher')
+    },
+  })
+  try {
+    const workspace = path.join(root, 'workspace-one')
+    const transcripts = path.join(workspace, 'GitHub.copilot-chat', 'transcripts')
+    const chats = path.join(workspace, 'chatSessions')
+    await fs.mkdir(transcripts, { recursive: true })
+    await fs.mkdir(chats, { recursive: true })
+    await fs.writeFile(
+      path.join(workspace, 'workspace.json'),
+      JSON.stringify({ folder: pathToFileURL(root).href }),
+    )
+    const encode = (type, timestamp, data = {}) =>
+      JSON.stringify({ type, timestamp: new Date(timestamp).toISOString(), data }) + '\n'
+    const runningFile = path.join(transcripts, 'old-running.jsonl')
+    await fs.writeFile(runningFile, encode('user.message', now - 10000, { content: 'Old run' }))
+    await fs.utimes(runningFile, new Date(now - 600000), new Date(now - 600000))
+    await fs.writeFile(
+      path.join(chats, 'old-running.jsonl'),
+      JSON.stringify({
+        kind: 0,
+        v: {
+          requests: [
+            { requestId: 'old-request', timestamp: now - 10000, modelState: { value: 0 } },
+          ],
+        },
+      }) + '\n',
+    )
+    assert.equal((await source.scan(now)).sessions[0].status, 'running')
+
+    const waitingFile = path.join(transcripts, 'old-waiting.jsonl')
+    await fs.writeFile(
+      waitingFile,
+      encode('user.message', now - 500000, { content: 'Old input request' }) +
+        encode('assistant.message', now - 499999, {
+          toolRequests: [{ toolCallId: 'question', name: 'vscode_askQuestions' }],
+        }),
+    )
+    await fs.utimes(waitingFile, new Date(now - 500000), new Date(now - 500000))
+    for (let index = 0; index < 101; index++) {
+      const filename = path.join(transcripts, `history-${index}.jsonl`)
+      await fs.writeFile(
+        filename,
+        encode('user.message', now - 10000, { content: `History ${index}` }) +
+          encode('assistant.message', now - 9000, { content: 'Finished' }) +
+          encode('assistant.turn_end', now - 8000),
+      )
+      await fs.utimes(filename, new Date(now), new Date(now))
+    }
+    const runningId = 'vscode:workspace-one:old-running'
+    const waitingId = 'vscode:workspace-one:old-waiting'
+    const before = await source.scan(now + 2000)
+    assert.equal(before.sessions.find((session) => session.id === runningId)?.status, 'running')
+    assert.equal(before.sessions.find((session) => session.id === waitingId)?.status, 'waiting')
+    const tracker = createAlertTracker()
+    tracker.update(before.sessions, now + 2000)
+    const quiet = await source.scan(now + 600000)
+    assert.equal(quiet.sessions.find((session) => session.id === runningId)?.status, 'idle')
+    tracker.update(quiet.sessions, now + 600000)
+    await fs.appendFile(
+      path.join(chats, 'old-running.jsonl'),
+      JSON.stringify({
+        kind: 0,
+        v: {
+          requests: [
+            {
+              requestId: 'old-request',
+              timestamp: now - 10000,
+              modelState: { value: 1, completedAt: now + 603000 },
+            },
+          ],
+        },
+      }) + '\n',
+    )
+    const after = await source.scan(now + 604000)
+    assert.equal(after.sessions.find((session) => session.id === runningId)?.status, 'completed')
+    assert.equal(after.sessions.find((session) => session.id === waitingId)?.status, 'waiting')
+    assert.ok(
+      tracker.update(after.sessions, now + 604000).some((alert) => alert.sessionId === runningId),
+    )
+    const restarted = createVSCodeSource(root)
+    try {
+      const restored = await restarted.scan(now + 605000)
+      assert.equal(restored.sessions.find((session) => session.id === waitingId)?.status, 'waiting')
+      assert.equal(
+        restored.sessions.find((session) => session.id === runningId)?.status,
+        'completed',
+      )
+    } finally {
+      restarted.close()
+    }
+  } finally {
+    source.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('written completion is published through file events without a polling tick', async () => {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'pulse-event-wake-'))
   const workspace = path.join(root, 'workspace-one')

@@ -80,10 +80,15 @@ function AlertPopup({ state }: { state: PulseAlertState }) {
     setBusy(true)
     setError(null)
     try {
-      const result = await window.pulse?.openSession(alert.sessionId, {
-        ...alert.reference,
-        alertId: alert.id,
-      })
+      const result = await window.pulse?.openSession(
+        alert.sessionId,
+        alert.recovered
+          ? undefined
+          : {
+              ...alert.reference,
+              alertId: alert.id,
+            },
+      )
       if (result?.message)
         setError({ id: alert.id, text: result.message ?? 'The session is not connected.' })
       else if (result?.mode === 'pulse-details') void window.pulse?.hideAlertPopup(sequence)
@@ -145,12 +150,18 @@ function AlertPopup({ state }: { state: PulseAlertState }) {
         className="alert-open-session"
         disabled={!alert || busy}
         onClick={() => void openAlert()}
-        title="View session in Pulse"
-        aria-label="View session in Pulse"
+        title={alert?.recovered ? 'View current session in Pulse' : 'View session in Pulse'}
+        aria-label={alert?.recovered ? 'View current session in Pulse' : 'View session in Pulse'}
       >
         <span className="alert-content" role="status">
           <strong className="alert-project">{alert?.project}</strong>
-          <span className="alert-task">{error?.id === alert?.id ? error?.text : alert?.task}</span>
+          <span className="alert-task">
+            {error?.id === alert?.id
+              ? error?.text
+              : alert?.recovered
+                ? 'Previous reminder. Original request not verified.'
+                : alert?.task}
+          </span>
         </span>
         {busy ? <LoaderCircle size={18} className="spin" /> : <ArrowUpRight size={18} />}
       </button>

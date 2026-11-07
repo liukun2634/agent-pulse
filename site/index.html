@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Monitor local agent sessions with Agent Pulse. Follow progress, get input and reply notifications, and inspect recent activity in one workspace."
+      content="Monitor agent sessions across projects and agent-specific source paths with Agent Pulse. Get input, reply-ready and error reminders in one local workspace."
     />
     <title>Agent Pulse · Agent Session Monitor</title>
     <link rel="icon" href="assets/pulse.png" />
@@ -36,8 +36,8 @@
         </p>
         <h1>Agent Pulse</h1>
         <p class="lead">
-          Keep your agent sessions in view.<br />Know when input is needed or a reply is ready, then
-          pick up where you left off.
+          Agent sessions across projects and source paths.<br />One local monitor, with input,
+          reply-ready and error reminders.
         </p>
         <div class="actions">
           <a class="button primary" href="download.html">{{icon:download}}Download for Windows</a
@@ -96,18 +96,18 @@
         <div class="feature-grid">
           <article>
             {{icon:activity}}
-            <h3>Track session status</h3>
+            <h3>Monitor across agent paths</h3>
             <p>
-              Active requests are checked every 2 seconds. Follow activity, input requests and reply
-              status in one place.
+              Follow all discovered sessions from supported agents in one Live view, even when their
+              tools and session data live in different locations. Filters never pause monitoring.
             </p>
           </article>
           <article>
             {{icon:bell}}
             <h3>Quiet notifications</h3>
             <p>
-              Brief notifications fade without taking keyboard focus. Pending reminders stay
-              available in the bell inbox.
+              Get alerts for input requests, ready replies and errors without taking keyboard focus.
+              Pending reminders stay available in the bell inbox.
             </p>
           </article>
           <article>
@@ -150,9 +150,10 @@
             <h2>Still in development</h2>
             <p>
               Local VS Code / Copilot and independent Claude Code session snapshots are supported.
-              Session actions open Pulse details, not external windows. Claude idle is not a
-              finished reply; exact turn events, Codex, sorting and more management tools are
-              planned.
+              The next priority is returning to the matching application's session input window.
+              Current actions still open Pulse details; external navigation is not available yet.
+              Status sorting is deferred, and Codex is not connected. Claude idle is not a finished
+              reply.
             </p>
           </div>
           <a class="text-link" href="https://github.com/liukun2634/agent-pulse/issues"

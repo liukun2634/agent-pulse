@@ -1,6 +1,19 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('pulse', {
+  getDesktopSettings: () => ipcRenderer.invoke('pulse:get-desktop-settings'),
+  syncReadState: (legacy) => ipcRenderer.invoke('pulse:sync-read-state', legacy),
+  markRead: (reference) => ipcRenderer.invoke('pulse:mark-read', reference),
+  onReadState: (listener) => {
+    const handler = (_event, value) => listener(value)
+    ipcRenderer.on('pulse:read-state', handler)
+    return () => ipcRenderer.removeListener('pulse:read-state', handler)
+  },
+  setHooks: (enabled) => ipcRenderer.invoke('pulse:set-hooks', enabled),
+  copyHooks: () => ipcRenderer.invoke('pulse:copy-hooks'),
+  saveSources: (value) => ipcRenderer.invoke('pulse:save-sources', value),
+  browseSource: (key) => ipcRenderer.invoke('pulse:browse-source', key),
+  checkSources: (value) => ipcRenderer.invoke('pulse:check-sources', value),
   getAlerts: () => ipcRenderer.invoke('pulse:get-alerts'),
   dismissAlert: (id) => ipcRenderer.invoke('pulse:dismiss-alert', id),
   showAlerts: () => ipcRenderer.invoke('pulse:show-alerts'),

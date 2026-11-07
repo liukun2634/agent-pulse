@@ -2,7 +2,7 @@ const assert = require('node:assert/strict')
 const { test } = require('node:test')
 const { createClaudeSource, claudeStatus } = require('../electron/claude-sessions.cjs')
 const { createLiveSources } = require('../electron/live-sources.cjs')
-const { createAlertTracker } = require('../electron/session-alerts.cjs')
+const { createAlertTracker, matchesReference } = require('../electron/session-alerts.cjs')
 
 const entry = {
   kind: 'interactive',
@@ -13,6 +13,63 @@ const entry = {
   status: 'idle',
 }
 
+test('local hooks authenticate, redact content and reject stale prompt completions', async () => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const { tmpdir } = require('node:os')
+  const { createClaudeHooks } = require('../electron/claude-hooks.cjs')
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'pulse-hooks-'))
+  const hooks = createClaudeHooks(root)
+  try {
+    await hooks.enable(true)
+    const handler = hooks.configuration().hooks.UserPromptSubmit[0].hooks[0]
+    const input = {
+      session_id: 'session-one',
+      prompt_id: 'round-one',
+      cwd: root,
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'private prompt',
+    }
+    const denied = await fetch(handler.url, { method: 'POST', body: JSON.stringify(input) })
+    assert.equal(denied.status, 403)
+    const post = (body) =>
+      fetch(handler.url, { method: 'POST', headers: handler.headers, body: JSON.stringify(body) })
+    assert.equal((await post(input)).status, 204)
+    assert.equal(hooks.records()[0].status, 'running')
+    await post({ ...input, hook_event_name: 'PermissionRequest' })
+    assert.equal(hooks.records()[0].status, 'waiting')
+    await post({ ...input, hook_event_name: 'Stop', last_assistant_message: 'private reply' })
+    assert.equal(hooks.records()[0].status, 'completed')
+    const finishedAt = hooks.records()[0].finishedAt
+    await post({ ...input, hook_event_name: 'Stop' })
+    assert.equal(hooks.records()[0].finishedAt, finishedAt)
+    await post(input)
+    assert.equal(hooks.records()[0].status, 'completed')
+    await post({ ...input, hook_event_name: 'PreToolUse', tool_name: 'Read' })
+    assert.equal(hooks.records()[0].status, 'running')
+    await post({ ...input, prompt_id: 'round-two' })
+    await post({ ...input, hook_event_name: 'Stop' })
+    assert.equal(hooks.records()[0].status, 'running')
+    await post({
+      ...input,
+      prompt_id: 'round-two',
+      hook_event_name: 'SubagentStop',
+      agent_id: 'child',
+    })
+    assert.equal(hooks.records()[0].status, 'running')
+    await post({ ...input, prompt_id: 'round-two', hook_event_name: 'StopFailure' })
+    assert.equal(hooks.records()[0].status, 'failed')
+    const saved = fs.readFileSync(path.join(root, 'claude-hooks.json'), 'utf8')
+    assert.equal(saved.includes('private prompt'), false)
+    assert.equal(saved.includes('private reply'), false)
+    await hooks.enable(false)
+    assert.deepEqual(hooks.records(), [])
+  } finally {
+    hooks.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('Claude idle is never running or inferred complete', () => {
   assert.equal(claudeStatus(entry), 'idle')
   assert.equal(claudeStatus({ ...entry, state: 'working' }), 'idle')
@@ -22,6 +79,30 @@ test('Claude idle is never running or inferred complete', () => {
   assert.equal(claudeStatus({ state: 'failed' }), 'failed')
   assert.equal(claudeStatus({ state: 'stopped' }), 'cancelled')
   assert.equal(claudeStatus({ status: 'new-state' }), 'unknown')
+})
+
+test('a short hook-only request produces a reply alert and retains its prompt identity', async () => {
+  const records = []
+  const hooks = { status: () => ({ listening: true }), records: () => records }
+  const source = createClaudeSource({ query: async () => '[]', hooks })
+  const tracker = createAlertTracker()
+  tracker.update((await source.scan()).sessions)
+  const now = Date.now()
+  records.push({
+    sessionId: 'short',
+    cwd: 'C:\\work',
+    requestId: 'prompt:one',
+    requestStartedAt: now,
+    updatedAt: now + 1,
+    finishedAt: now + 1,
+    status: 'completed',
+    event: 'Stop',
+  })
+  const completed = (await source.scan(now + 2)).sessions
+  assert.equal(completed[0].requestId, 'prompt:one')
+  assert.equal(tracker.update(completed).length, 1)
+  assert.equal(tracker.update(completed).length, 0)
+  source.close()
 })
 
 test('Claude snapshots retain observed run time and reset it for a new run', async () => {
@@ -46,6 +127,42 @@ test('Claude snapshots retain observed run time and reset it for a new run', asy
   source.close()
 })
 
+test('Claude first waiting starts an observed clock on execution without resetting an existing run', async () => {
+  let rows = [{ ...entry, status: 'waiting' }]
+  const query = async () => JSON.stringify(rows)
+  const source = createClaudeSource({ query })
+  try {
+    const waiting = (await source.scan(20000)).sessions[0]
+    assert.equal(waiting.requestStartedAt, undefined)
+    rows = [{ ...entry, status: 'busy' }]
+    const running = (await source.scan(21000)).sessions[0]
+    assert.equal(running.requestStartedAt, 21000)
+    assert.equal(running.requestId, waiting.requestId)
+    assert.equal((await source.scan(22000)).sessions[0].requestStartedAt, 21000)
+    rows = [{ ...entry, status: 'waiting' }]
+    assert.equal((await source.scan(23000)).sessions[0].requestStartedAt, 21000)
+    rows = [{ ...entry, status: 'busy' }]
+    assert.equal((await source.scan(24000)).sessions[0].requestStartedAt, 21000)
+    rows = [entry]
+    await source.scan(25000)
+    rows = [{ ...entry, status: 'busy' }]
+    const next = (await source.scan(26000)).sessions[0]
+    assert.equal(next.requestStartedAt, 26000)
+    assert.notEqual(next.requestId, running.requestId)
+  } finally {
+    source.close()
+  }
+  rows = [{ ...entry, status: 'waiting' }]
+  const restarted = createClaudeSource({ query })
+  try {
+    await restarted.scan(30000)
+    rows = [{ ...entry, status: 'busy' }]
+    assert.equal((await restarted.scan(31000)).sessions[0].requestStartedAt, 31000)
+  } finally {
+    restarted.close()
+  }
+})
+
 test('Claude query failure or disappearance never produces a completion', async () => {
   let payload = JSON.stringify([{ ...entry, status: 'busy' }])
   const source = createClaudeSource({ query: async () => payload })
@@ -59,6 +176,59 @@ test('Claude query failure or disappearance never produces a completion', async 
   assert.equal(missing.state, 'empty')
   assert.equal(missing.sessions[0].status, 'disconnected')
   source.close()
+})
+
+test('Claude recovery separates observations without reviving ignored waiting or inventing completion', async () => {
+  let payload = JSON.stringify([{ ...entry, status: 'busy' }])
+  const query = async () => payload
+  const original = createClaudeSource({ query })
+  const tracker = createAlertTracker()
+  tracker.update((await original.scan(2000)).sessions, 2000)
+  payload = JSON.stringify([{ ...entry, status: 'waiting' }])
+  const waiting = (await original.scan(3000)).sessions[0]
+  const [alert] = tracker.update([waiting], 3000)
+  const baseline = tracker.snapshot()
+  original.close()
+
+  const restarted = createClaudeSource({ query })
+  try {
+    const restoredTracker = createAlertTracker()
+    restoredTracker.restore(baseline)
+    const recovered = (await restarted.scan(3000)).sessions[0]
+    assert.ok(recovered.observationId)
+    assert.notEqual(recovered.observationId, waiting.observationId)
+    assert.notEqual(recovered.requestId, waiting.requestId)
+    assert.equal(matchesReference(recovered, alert.reference), false)
+    assert.deepEqual(restoredTracker.update([recovered], 4000), [])
+    payload = JSON.stringify([{ ...entry, status: 'busy' }])
+    restoredTracker.update((await restarted.scan(5000)).sessions, 5000)
+    payload = JSON.stringify([{ ...entry, status: 'waiting' }])
+    const [fresh] = restoredTracker.update((await restarted.scan(6000)).sessions, 6000)
+    assert.equal(fresh.initial, false)
+    assert.equal(fresh.recovered, undefined)
+    payload = 'invalid'
+    await restarted.scan(7000)
+    payload = JSON.stringify([{ ...entry, status: 'waiting' }])
+    const reconnected = (await restarted.scan(8000)).sessions[0]
+    assert.notEqual(reconnected.observationId, recovered.observationId)
+    assert.equal(matchesReference(reconnected, fresh.reference), false)
+    assert.deepEqual(restoredTracker.update([reconnected], 8000), [])
+    restarted.beginRecovery()
+    const awakened = (await restarted.scan(9000)).sessions[0]
+    assert.notEqual(awakened.observationId, reconnected.observationId)
+  } finally {
+    restarted.close()
+  }
+
+  payload = JSON.stringify([{ ...entry, kind: 'background', state: 'done' }])
+  const completed = createClaudeSource({ query })
+  try {
+    const restoredTracker = createAlertTracker()
+    restoredTracker.restore(baseline)
+    assert.deepEqual(restoredTracker.update((await completed.scan(10000)).sessions, 10000), [])
+  } finally {
+    completed.close()
+  }
 })
 
 test('Claude polling is single-flight and missing CLI is explicit', async () => {
