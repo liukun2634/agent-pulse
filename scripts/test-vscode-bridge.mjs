@@ -18,7 +18,8 @@ fs.mkdirSync(path.join(root, '.artifacts'), { recursive: true })
 try {
   await runTests({
     vscodeExecutablePath: executable,
-    extensionDevelopmentPath: path.join(root, 'vscode-session-bridge'),
+    extensionDevelopmentPath:
+      process.env.PULSE_SESSION_BRIDGE_EXTENSION_PATH || path.join(root, 'vscode-session-bridge'),
     extensionTestsPath: path.join(root, 'tests', 'vscode-bridge.smoke.cjs'),
     extensionTestsEnv: {
       PULSE_SESSION_BRIDGE_TEST_REGISTRY: path.join(temporary, 'registry'),

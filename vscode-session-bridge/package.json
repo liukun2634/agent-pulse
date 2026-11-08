@@ -2,7 +2,7 @@
   "name": "pulse-session-bridge",
   "displayName": "Pulse Session Bridge",
   "description": "Experimental navigation from Agent Pulse to saved Copilot chats in an existing VS Code window.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "agent-pulse-local",
   "engines": {
     "vscode": "^1.141.0"
@@ -21,7 +21,9 @@
     "extension.cjs",
     "navigation.cjs",
     "protocol.cjs",
-    "README.md"
+    "README.md",
+    "node_modules/stream-json/**",
+    "node_modules/stream-chain/**"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -50,6 +52,10 @@
     }
   },
   "scripts": {
+    "prepackage": "npm ci --omit=dev --ignore-scripts",
     "package": "npx --yes @vscode/vsce@3 package --out ../.artifacts/pulse-session-bridge.vsix --allow-missing-repository --skip-license"
+  },
+  "dependencies": {
+    "stream-json": "^3.8.0"
   }
 }

@@ -77,7 +77,9 @@ const SEEN_KEY = 'pulse.seen-replies.v1'
 const desktop = window.pulse
 const miniMode = new URLSearchParams(window.location.search).get('view') === 'mini'
 
-function SessionNavigation({ session }: { session: Session }) {
+function SessionNavigation({ session, compact = false }: { session: Session; compact?: boolean }) {
+  const dialog = useRef<HTMLDialogElement>(null)
+  const [dialogOpen, setDialogOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [instanceId, setInstanceId] = useState('')
@@ -85,32 +87,32 @@ function SessionNavigation({ session }: { session: Session }) {
     reference: PulseSessionReference
     windows: { instanceId: string; label: string }[]
   } | null>(null)
+  useEffect(() => {
+    if (dialogOpen && !dialog.current?.open) dialog.current?.showModal()
+    else if (!dialogOpen) dialog.current?.close()
+  }, [dialogOpen])
   async function reveal(reference: PulseSessionReference, chosen?: string) {
     if (!desktop || busy) return
     setBusy(true)
     setMessage('')
     try {
       const result = await desktop.revealSession(session.id, reference, chosen)
-      setMessage(result.message)
+      setMessage(compact && result.mode === 'requested' ? '' : result.message)
+      setInstanceId('')
       setChoices(result.mode === 'ambiguous' ? { reference, windows: result.windows ?? [] } : null)
+      if (compact) setDialogOpen(result.mode !== 'requested')
     } catch {
+      setChoices(null)
       setMessage(
         'The application connection is unavailable. Pulse details and reminders are unchanged.',
       )
+      if (compact) setDialogOpen(true)
     } finally {
       setBusy(false)
     }
   }
-  return (
-    <div className="session-navigation">
-      <button
-        className="button button-secondary open-session-button"
-        disabled={busy}
-        onClick={() => void reveal(referenceForSession(session))}
-      >
-        {busy ? <LoaderCircle size={15} className="spin" /> : <ArrowUpRight size={15} />}
-        Open saved Chat in VS Code
-      </button>
+  const feedback = (
+    <>
       {choices && (
         <div className="navigation-choices">
           <label>
@@ -142,6 +144,52 @@ function SessionNavigation({ session }: { session: Session }) {
         <p className="navigation-feedback" role="status">
           {message}
         </p>
+      )}
+    </>
+  )
+  return (
+    <div className={`session-navigation ${compact ? 'session-navigation-compact' : ''}`}>
+      <button
+        className={`${compact ? 'icon-button' : 'button button-secondary'} open-session-button`}
+        aria-label={compact ? 'Open session in VS Code' : undefined}
+        title={compact ? 'Open session in VS Code' : undefined}
+        disabled={busy}
+        onClick={() => void reveal(referenceForSession(session))}
+      >
+        {busy ? <LoaderCircle size={15} className="spin" /> : <ArrowUpRight size={15} />}
+        {!compact && 'Open saved Chat in VS Code'}
+      </button>
+      {compact ? (
+        <dialog
+          ref={dialog}
+          className="navigation-dialog"
+          aria-label="VS Code session navigation"
+          onClose={() => {
+            setDialogOpen(false)
+            setMessage('')
+            setChoices(null)
+          }}
+        >
+          <div className="navigation-dialog-header">
+            <h2>Open in VS Code</h2>
+            <IconButton label="Close session navigation" onClick={() => setDialogOpen(false)}>
+              <X size={17} />
+            </IconButton>
+          </div>
+          <p className="navigation-session-name">{session.task}</p>
+          {feedback}
+          {!choices && (
+            <button
+              className="button button-secondary"
+              disabled={busy}
+              onClick={() => void reveal(referenceForSession(session))}
+            >
+              <RotateCcw size={14} /> Retry navigation
+            </button>
+          )}
+        </dialog>
+      ) : (
+        feedback
       )}
     </div>
   )
@@ -458,59 +506,66 @@ function SessionCard({
   onSelect: () => void
   index: number
 }) {
+  const canNavigate = !!desktop && session.source === 'vscode'
   return (
-    <button
-      className={`session-card ${selected ? 'selected' : ''} session-${session.status}`}
-      onClick={onSelect}
-      aria-pressed={selected}
-      aria-label={`${session.project}: ${session.task}`}
-      style={{ animationDelay: `${index * 45}ms` }}
-    >
-      <div className="session-card-top">
-        <span className="project-name">
-          <span className={`project-glyph project-${session.project}`}>
-            <Folder size={14} />
+    <div className="session-card-shell">
+      <button
+        className={`session-card ${selected ? 'selected' : ''} session-${session.status}`}
+        onClick={onSelect}
+        aria-pressed={selected}
+        aria-label={`${session.project}: ${session.task}`}
+        style={{ animationDelay: `${index * 45}ms` }}
+      >
+        <div className="session-card-top">
+          <span className="project-name">
+            <span className={`project-glyph project-${session.project}`}>
+              <Folder size={14} />
+            </span>
+            {session.project}
           </span>
-          {session.project}
-        </span>
-        <ArrowUpRight size={15} className="card-arrow" />
-      </div>
-      <h3>{session.task}</h3>
-      <div className="session-provider">
-        <ProviderIcon provider={session.provider} size={14} />
-        <span>{providers[session.provider].name}</span>
-        <span className="separator">/</span>
-        <span className="session-number" title={session.id}>
-          #{session.id.split(':').at(-1)?.slice(0, 8)}
-        </span>
-      </div>
-      <div className="session-card-bottom">
-        <StatusBadge status={session.status} />
-        {session.archivedAt && (
-          <span className="archive-badge">
-            <Archive size={11} />
-            Archived
+          <ArrowUpRight
+            size={15}
+            className={`card-arrow ${canNavigate ? 'navigation-placeholder' : ''}`}
+          />
+        </div>
+        <h3>{session.task}</h3>
+        <div className="session-provider">
+          <ProviderIcon provider={session.provider} size={14} />
+          <span>{providers[session.provider].name}</span>
+          <span className="separator">/</span>
+          <span className="session-number" title={session.id}>
+            #{session.id.split(':').at(-1)?.slice(0, 8)}
           </span>
+        </div>
+        <div className="session-card-bottom">
+          <StatusBadge status={session.status} />
+          {session.archivedAt && (
+            <span className="archive-badge">
+              <Archive size={11} />
+              Archived
+            </span>
+          )}
+          <span
+            className="duration"
+            title={
+              session.status === 'running'
+                ? 'Current request elapsed time'
+                : 'Time since last activity'
+            }
+          >
+            <Clock3 size={12} />
+            {sessionDuration(session, now)}
+          </span>
+        </div>
+        <span className="session-entry">Entry: {sessionHostLabel(session)}</span>
+        {session.source && (
+          <p className="session-progress" title={session.events.at(-1)?.text}>
+            {session.events.at(-1)?.text}
+          </p>
         )}
-        <span
-          className="duration"
-          title={
-            session.status === 'running'
-              ? 'Current request elapsed time'
-              : 'Time since last activity'
-          }
-        >
-          <Clock3 size={12} />
-          {sessionDuration(session, now)}
-        </span>
-      </div>
-      <span className="session-entry">Entry: {sessionHostLabel(session)}</span>
-      {session.source && (
-        <p className="session-progress" title={session.events.at(-1)?.text}>
-          {session.events.at(-1)?.text}
-        </p>
-      )}
-    </button>
+      </button>
+      {canNavigate && <SessionNavigation session={session} compact />}
+    </div>
   )
 }
 
@@ -1337,38 +1392,46 @@ function Workspace() {
               {feed.state === 'connecting' ? 'Loading sessions...' : 'No live sessions'}
             </p>
           )}
-          {miniPageSessions.map((session) => (
-            <button
-              key={session.id}
-              className={`mini-session mini-${session.status}`}
-              title={`${session.project}\n${session.task}\n${sessionHostLabel(session)}\nView session in Pulse`}
-              onClick={() => openWorkspace(session.id)}
-            >
-              <span className="mini-provider">
-                <ProviderIcon provider={session.provider} size={20} />
-              </span>
-              <span className="mini-session-content">
-                <strong className="mini-session-title">{session.project}</strong>
-                <span className="mini-session-subtitle" title={session.task}>
-                  {session.task}
-                </span>
-                <StatusBadge status={session.status} />
-                {live && <span className="mini-progress">{session.events.at(-1)?.text}</span>}
-              </span>
-              <span className="mini-session-end">
-                <span
-                  title={
-                    session.status === 'running'
-                      ? 'Current request elapsed time'
-                      : 'Time since last activity'
-                  }
+          {miniPageSessions.map((session) => {
+            const canNavigate = !!desktop && session.source === 'vscode'
+            return (
+              <div className="mini-session-shell" key={session.id}>
+                <button
+                  className={`mini-session mini-${session.status}`}
+                  title={`${session.project}\n${session.task}\n${sessionHostLabel(session)}\nView session in Pulse`}
+                  onClick={() => openWorkspace(session.id)}
                 >
-                  {sessionDuration(session, now)}
-                </span>
-                <ArrowUpRight size={13} />
-              </span>
-            </button>
-          ))}
+                  <span className="mini-provider">
+                    <ProviderIcon provider={session.provider} size={20} />
+                  </span>
+                  <span className="mini-session-content">
+                    <strong className="mini-session-title">{session.project}</strong>
+                    <span className="mini-session-subtitle" title={session.task}>
+                      {session.task}
+                    </span>
+                    <StatusBadge status={session.status} />
+                    {live && <span className="mini-progress">{session.events.at(-1)?.text}</span>}
+                  </span>
+                  <span className="mini-session-end">
+                    <span
+                      title={
+                        session.status === 'running'
+                          ? 'Current request elapsed time'
+                          : 'Time since last activity'
+                      }
+                    >
+                      {sessionDuration(session, now)}
+                    </span>
+                    <ArrowUpRight
+                      size={13}
+                      className={canNavigate ? 'navigation-placeholder' : undefined}
+                    />
+                  </span>
+                </button>
+                {canNavigate && <SessionNavigation session={session} compact />}
+              </div>
+            )
+          })}
         </div>
         {miniPagination}
         <footer className="mini-footer">

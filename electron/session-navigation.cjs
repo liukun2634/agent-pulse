@@ -54,6 +54,12 @@ function createSessionNavigator({ getSession, resolveTarget, listWindows, send }
             label: window.label,
           })),
         }
+      if (chosen.chatViewNavigation !== true)
+        return {
+          mode: 'unavailable',
+          message:
+            'Reload the target VS Code window to activate the updated Pulse Session Bridge. No Chat editor was opened.',
+        }
       if (!matchesReference(getSession(id), reference))
         return { mode: 'stale', message: 'The request changed before navigation.' }
       const requestId = randomUUID()

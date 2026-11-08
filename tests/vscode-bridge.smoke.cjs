@@ -12,60 +12,75 @@ async function run() {
   assert.ok(api?.workspaceStoragePath)
   const sessionId = randomUUID()
   const title = `Pulse smoke ${sessionId.slice(0, 8)}`
+  const otherSessionId = randomUUID()
+  const otherTitle = `Other smoke ${otherSessionId.slice(0, 8)}`
   const directory = path.join(api.workspaceStoragePath, 'chatSessions')
   await fs.mkdir(directory, { recursive: true })
-  await fs.writeFile(
-    path.join(directory, `${sessionId}.jsonl`),
-    JSON.stringify({
-      kind: 0,
-      v: {
-        version: 3,
-        sessionId,
-        creationDate: Date.now(),
-        lastMessageDate: Date.now(),
-        responderUsername: 'Assistant',
-        initialLocation: 'panel',
-        customTitle: title,
-        requests: [],
-      },
-    }) + '\n',
-  )
+  for (const [savedId, savedTitle] of [
+    [sessionId, title],
+    [otherSessionId, otherTitle],
+  ])
+    await fs.writeFile(
+      path.join(directory, `${savedId}.jsonl`),
+      JSON.stringify({
+        kind: 0,
+        v: {
+          version: 3,
+          sessionId: savedId,
+          creationDate: Date.now(),
+          lastMessageDate: Date.now(),
+          responderUsername: 'Assistant',
+          initialLocation: 'panel',
+          customTitle: savedTitle,
+          requests: [],
+        },
+      }) + '\n',
+    )
   const windows = await listWindows(process.env.PULSE_SESSION_BRIDGE_TEST_REGISTRY)
   assert.equal(windows.length, 1)
-  const result = await send(windows[0], {
-    version: 1,
-    requestId: randomUUID(),
-    instanceId: api.instanceId,
-    workspaceStoragePath: api.workspaceStoragePath,
-    sessionId,
-  })
-  const tab = vscode.window.tabGroups.activeTabGroup.activeTab
-  const report = {
-    vscodeVersion: vscode.version,
-    result,
-    activeTabLabel: tab?.label,
-    activeInputType: tab?.input?.constructor?.name,
-    inputKeys: tab?.input ? Object.keys(tab.input) : [],
-    activeEditorScheme: vscode.window.activeTextEditor?.document.uri.scheme,
+  assert.equal(windows[0].bridgeVersion, extension.packageJSON.version)
+  assert.equal(windows[0].chatViewNavigation, true)
+  const tabCount = () =>
+    vscode.window.tabGroups.all.reduce((count, group) => count + group.tabs.length, 0)
+  const before = tabCount()
+  async function navigate(savedId) {
+    const result = await send(windows[0], {
+      version: 1,
+      requestId: randomUUID(),
+      instanceId: api.instanceId,
+      workspaceStoragePath: api.workspaceStoragePath,
+      sessionId: savedId,
+    })
+    assert.equal(result.ok, true, result.message)
+    assert.equal(tabCount(), before, 'Navigation must not leave a new Chat editor tab.')
+    await vscode.commands.executeCommand('workbench.action.chat.inspectChatModel')
+    const inspection = vscode.window.activeTextEditor?.document.getText()
+    assert.ok(inspection?.includes('## Full Chat Model'))
+    const model = JSON.parse(
+      inspection.split('## Full Chat Model')[1].split('```json\n')[1].split('\n```')[0],
+    )
+    assert.equal(model.sessionId, savedId, 'The Chat sidebar must contain the requested session.')
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor')
+    assert.equal(tabCount(), before)
+    return result
   }
-  await fs.writeFile(process.env.PULSE_SESSION_BRIDGE_TEST_OUTPUT, JSON.stringify(report, null, 2))
-  assert.equal(result.ok, true, result.message)
-  assert.equal(tab?.label, title, 'The controlled saved session was not the active Chat editor.')
-  const firstCount = vscode.window.tabGroups.all.reduce(
-    (count, group) => count + group.tabs.length,
-    0,
-  )
-  const repeated = await send(windows[0], {
-    version: 1,
-    requestId: randomUUID(),
-    instanceId: api.instanceId,
-    workspaceStoragePath: api.workspaceStoragePath,
-    sessionId,
-  })
-  assert.equal(repeated.ok, true)
-  assert.equal(
-    vscode.window.tabGroups.all.reduce((count, group) => count + group.tabs.length, 0),
-    firstCount,
+  const result = await navigate(sessionId)
+  await navigate(otherSessionId)
+  await navigate(sessionId)
+  await fs.writeFile(
+    process.env.PULSE_SESSION_BRIDGE_TEST_OUTPUT,
+    JSON.stringify(
+      {
+        vscodeVersion: vscode.version,
+        result,
+        sidebarSessionVerified: true,
+        switchedFromOtherChat: true,
+        editorTabsBefore: before,
+        editorTabsAfter: tabCount(),
+      },
+      null,
+      2,
+    ),
   )
 }
 

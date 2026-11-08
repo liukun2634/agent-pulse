@@ -747,14 +747,17 @@ ipcMain.handle('pulse:open-session', async (event, id, reference) => {
   return openSessionDetails(id, reference)
 })
 ipcMain.handle('pulse:reveal-session', async (event, id, reference, instanceId) => {
-  trustedWindow(event)
+  const window = trustedWindow(event)
   if (
     typeof id !== 'string' ||
     id.length > 512 ||
     (instanceId !== undefined && (typeof instanceId !== 'string' || instanceId.length > 100))
   )
     throw new TypeError('Invalid navigation request.')
-  return sessionNavigator.reveal(id, reference, instanceId)
+  const result = await sessionNavigator.reveal(id, reference, instanceId)
+  if (result.mode === 'requested' && window === mainWindow && !window.isDestroyed())
+    window.minimize()
+  return result
 })
 ipcMain.handle('pulse:set-pinned', (event, pinned) => {
   if (typeof pinned !== 'boolean') throw new TypeError('Expected a boolean.')

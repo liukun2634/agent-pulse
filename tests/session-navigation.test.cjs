@@ -46,12 +46,13 @@ test('navigation requires exact storage identity and explicit selection for dupl
   }
   const target = { workspaceStoragePath: path.resolve('test-storage', 'one'), sessionId: 'session' }
   let calls = 0
+  let chatViewNavigation = false
   const navigator = createSessionNavigator({
     getSession: () => current,
     resolveTarget: () => target,
     listWindows: async () => [
-      { ...target, instanceId: 'first', label: 'Window one' },
-      { ...target, instanceId: 'second', label: 'Window two' },
+      { ...target, instanceId: 'first', label: 'Window one', chatViewNavigation },
+      { ...target, instanceId: 'second', label: 'Window two', chatViewNavigation },
       {
         workspaceStoragePath: path.resolve('other-storage', 'one'),
         instanceId: 'unrelated',
@@ -75,6 +76,11 @@ test('navigation requires exact storage identity and explicit selection for dupl
   assert.equal(choices.windows.length, 2)
   assert.equal(calls, 0)
   assert.equal((await navigator.reveal(current.id, reference, 'unrelated')).mode, 'unavailable')
+  const outdated = await navigator.reveal(current.id, reference, 'second')
+  assert.equal(outdated.mode, 'unavailable')
+  assert.match(outdated.message, /Reload/)
+  assert.equal(calls, 0)
+  chatViewNavigation = true
   assert.equal((await navigator.reveal(current.id, reference, 'second')).mode, 'requested')
   assert.equal(calls, 1)
   current.requestId = 'new-round'
@@ -96,7 +102,9 @@ test('a late response cannot acknowledge a new request or claim verified input f
   const navigator = createSessionNavigator({
     getSession: () => current,
     resolveTarget: () => target,
-    listWindows: async () => [{ ...target, instanceId: 'one', label: 'Original window' }],
+    listWindows: async () => [
+      { ...target, instanceId: 'one', label: 'Original window', chatViewNavigation: true },
+    ],
     send: async (_window, request) => {
       current = { ...current, requestId: 'new', finishedAt: 20 }
       return request
@@ -105,7 +113,7 @@ test('a late response cannot acknowledge a new request or claim verified input f
   assert.equal((await navigator.reveal(current.id, reference)).mode, 'stale')
 })
 
-test('bridge opens only an existing saved resource and does not issue chat input or move commands', async () => {
+test('bridge reveals only an existing saved resource in Chat without sending input or changing layout', async () => {
   const fs = require('node:fs/promises')
   const { tmpdir } = require('node:os')
   const { createChatNavigator } = require('../vscode-session-bridge/navigation.cjs')
@@ -116,7 +124,11 @@ test('bridge opens only an existing saved resource and does not issue chat input
     Uri: { from: (value) => value },
     window: { state: { focused: true } },
     commands: {
-      getCommands: async () => ['vscode.open', 'workbench.action.focusWindow'],
+      getCommands: async () => [
+        'vscode.open',
+        'workbench.action.focusWindow',
+        'workbench.action.chat.openInSidebar',
+      ],
       executeCommand: async (...args) => {
         calls.push(args)
       },
@@ -148,10 +160,35 @@ test('bridge opens only an existing saved resource and does not issue chat input
     assert.equal(result.inputFocused, undefined)
     assert.deepEqual(
       calls.map((call) => call[0]),
-      ['workbench.action.focusWindow', 'vscode.open'],
+      ['workbench.action.focusWindow', 'vscode.open', 'workbench.action.chat.openInSidebar'],
     )
     assert.equal(calls[1][1].path, `/${Buffer.from('existing').toString('base64url')}`)
     assert.equal(calls[1][2].preserveFocus, false)
+    const header =
+      '{"kind":0,"v":{"sessionId":"existing","creationDate":1,"responderUsername":"Assistant","requests":[]'
+    for (const invalid of [
+      `${header},"sessionId":null}}\n`,
+      `${header},"sessionId":"other"}}\n`,
+      `${header},"requests":null}}\n`,
+      `${header},"responderUsername":{}}}\n`,
+      `${header}}}`,
+      `${header},"unfinished":"`,
+    ]) {
+      await fs.writeFile(saved, invalid)
+      await assert.rejects(
+        navigator.open('existing', Date.now() + 5000),
+        /incomplete|could not be verified/,
+      )
+      assert.equal(calls.length, 3)
+    }
+    await fs.writeFile(
+      saved,
+      '{"kind":0,"v":{"sessionId":"existing","creationDate":1,"responderUsername":"Assistant","requests":[{"response":"',
+    )
+    await fs.appendFile(saved, Buffer.alloc(36 * 1024 * 1024, 120))
+    await fs.appendFile(saved, '"}]}}\n')
+    assert.equal((await navigator.open('existing', Date.now() + 5000)).ok, true)
+    assert.equal(calls.length, 6)
     api.version = '1.144.0'
     await assert.rejects(navigator.open('existing', Date.now() + 1000), /1.143/)
   } finally {

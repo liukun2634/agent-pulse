@@ -51,6 +51,8 @@ async function activate(context) {
           label,
           seenAt: Date.now(),
           vscodeVersion: vscode.version,
+          bridgeVersion: context.extension.packageJSON.version,
+          chatViewNavigation: true,
         }),
         { mode: 0o600 },
       )

@@ -215,6 +215,19 @@ test(
       application = await electron.launch({ args: [process.cwd()], env })
       const main = await application.firstWindow()
       await expect(main.locator('.session-waiting')).toHaveCount(1)
+      const mainWindow = await application.browserWindow(main)
+      await mainWindow.evaluate((window) => window.setAlwaysOnTop(true))
+      const shortcut = main.getByRole('button', { name: 'Open session in VS Code', exact: true })
+      const navigationDialog = main.getByRole('dialog', { name: 'VS Code session navigation' })
+      await main.locator('.session-card').click()
+      await expect(navigationDialog).not.toBeVisible()
+      assert.equal(await mainWindow.evaluate((window) => window.isMinimized()), false)
+      await shortcut.click()
+      await expect(navigationDialog).toBeVisible()
+      await expect(navigationDialog).toContainText('No matching VS Code bridge')
+      assert.equal(await mainWindow.evaluate((window) => window.isMinimized()), false)
+      await navigationDialog.getByRole('button', { name: 'Close session navigation' }).click()
+      await expect(navigationDialog).not.toBeVisible()
       await main.getByRole('button', { name: 'Open saved Chat in VS Code', exact: true }).click()
       await expect(main.locator('.navigation-feedback')).toContainText('No matching VS Code bridge')
       const initial = await main.evaluate(() => window.pulse.getAlerts())
@@ -262,6 +275,7 @@ test(
           workspaceStoragePath: workspace,
           label,
           seenAt: Date.now(),
+          chatViewNavigation: true,
         }
         descriptors.push(descriptor)
         writeFileSync(path.join(directory, `${instanceId}.json`), JSON.stringify(descriptor))
@@ -275,6 +289,9 @@ test(
       await main.getByRole('button', { name: 'Open selected window', exact: true }).click()
       await expect(main.locator('.navigation-feedback')).toContainText('not independently verified')
       assert.deepEqual(calls, [descriptors[1].instanceId])
+      assert.equal(await mainWindow.evaluate((window) => window.isMinimized()), true)
+      assert.equal(await mainWindow.evaluate((window) => window.isAlwaysOnTop()), true)
+      await mainWindow.evaluate((window) => window.restore())
       assert.deepEqual((await main.evaluate(() => window.pulse.getAlerts())).items, initial.items)
       assert.deepEqual(
         (await main.evaluate(() => window.pulse.getDesktopSettings())).seenReplies,
@@ -299,6 +316,86 @@ test(
         true,
       )
       await main.screenshot({ path: '.artifacts/navigation-mobile.png', animations: 'disabled' })
+      await shortcut.click()
+      await expect(navigationDialog).toBeVisible()
+      assert.equal(calls.length, 1)
+      assert.equal(
+        await main.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+        true,
+      )
+      await main.screenshot({
+        path: '.artifacts/navigation-shortcut-mobile.png',
+        animations: 'disabled',
+      })
+      await main.setViewportSize({ width: 1200, height: 800 })
+      await main.screenshot({
+        path: '.artifacts/navigation-shortcut-desktop.png',
+        animations: 'disabled',
+      })
+      await navigationDialog
+        .getByRole('combobox', { name: 'Original VS Code window' })
+        .selectOption(descriptors[0].instanceId)
+      await navigationDialog
+        .getByRole('button', { name: 'Open selected window', exact: true })
+        .click()
+      await expect(navigationDialog).not.toBeVisible()
+      assert.deepEqual(calls, [descriptors[1].instanceId, descriptors[0].instanceId])
+      assert.equal(await mainWindow.evaluate((window) => window.isMinimized()), true)
+      await mainWindow.evaluate((window) => window.restore())
+      const opened = application.waitForEvent('window')
+      await main.getByRole('button', { name: 'Mini monitor', exact: true }).click()
+      const mini = await opened
+      const miniWindow = await application.browserWindow(mini)
+      const miniShortcut = mini.getByRole('button', {
+        name: 'Open session in VS Code',
+        exact: true,
+      })
+      const miniDialog = mini.getByRole('dialog', { name: 'VS Code session navigation' })
+      await miniShortcut.click()
+      await expect(miniDialog).toBeVisible()
+      assert.equal(
+        await mini.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+        true,
+      )
+      await mini.screenshot({ path: '.artifacts/navigation-mini.png', animations: 'disabled' })
+      await miniDialog
+        .getByRole('combobox', { name: 'Original VS Code window' })
+        .selectOption(descriptors[1].instanceId)
+      await miniDialog.getByRole('button', { name: 'Open selected window', exact: true }).click()
+      await expect(miniDialog).not.toBeVisible()
+      assert.equal(await miniWindow.evaluate((window) => window.isMinimized()), false)
+      assert.equal(await miniWindow.evaluate((window) => window.isAlwaysOnTop()), true)
+      assert.deepEqual(calls, [
+        descriptors[1].instanceId,
+        descriptors[0].instanceId,
+        descriptors[1].instanceId,
+      ])
+      assert.deepEqual((await mini.evaluate(() => window.pulse.getAlerts())).items, initial.items)
+      assert.deepEqual(
+        (await mini.evaluate(() => window.pulse.getDesktopSettings())).seenReplies,
+        {},
+      )
+      const visibleModes = await application.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()
+          .filter((window) => window.isVisible())
+          .map((window) => new URL(window.webContents.getURL()).searchParams.get('view')),
+      )
+      assert.ok(visibleModes.includes('mini'))
+      assert.ok(!visibleModes.includes(null))
+      for (const descriptor of descriptors)
+        rmSync(path.join(directory, `${descriptor.instanceId}.json`))
+      await mini.locator('.mini-session').click()
+      await expect(miniDialog).not.toBeVisible()
+      assert.equal(calls.length, 3)
+      assert.equal(await mainWindow.evaluate((window) => window.isVisible()), true)
+      await main.getByRole('button', { name: 'Mini monitor', exact: true }).click()
+      await miniShortcut.click()
+      await expect(miniDialog).toContainText('No matching VS Code bridge')
+      await miniDialog.getByRole('button', { name: 'Close session navigation' }).click()
+      await mini.screenshot({
+        path: '.artifacts/navigation-mini-session.png',
+        animations: 'disabled',
+      })
     } finally {
       if (application) await application.close()
       for (const server of servers) await new Promise((resolve) => server.close(resolve))

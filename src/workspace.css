@@ -24,6 +24,65 @@
   padding: 8px;
   font: inherit;
 }
+.session-card-shell,
+.mini-session-shell {
+  position: relative;
+  min-width: 0;
+}
+.session-card-shell {
+  display: grid;
+}
+.session-card-shell > .session-card {
+  width: 100%;
+  height: 100%;
+}
+.session-navigation-compact {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+}
+.session-card-shell > .session-navigation-compact {
+  top: 10px;
+  right: 9px;
+}
+.mini-session-shell > .session-navigation-compact {
+  top: 32px;
+  right: -7px;
+}
+.session-navigation-compact > .open-session-button {
+  width: 28px;
+  height: 28px;
+}
+.navigation-placeholder {
+  visibility: hidden;
+}
+.navigation-dialog {
+  width: min(420px, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  padding: 18px;
+  border: 1px solid #d7e1d3;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  overflow: auto;
+}
+.navigation-dialog::backdrop {
+  background: #1b29254d;
+}
+.navigation-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.navigation-dialog h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.navigation-session-name {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 .mini-pagination {
   display: flex;
   align-items: center;
