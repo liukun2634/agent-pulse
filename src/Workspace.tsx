@@ -78,6 +78,9 @@ const desktop = window.pulse
 const miniMode = new URLSearchParams(window.location.search).get('view') === 'mini'
 
 function SessionNavigation({ session, compact = false }: { session: Session; compact?: boolean }) {
+  const terminal = session.source === 'claude'
+  const targetLabel = terminal ? 'Claude terminal' : 'VS Code'
+  const selectionLabel = terminal ? 'Claude terminal tab or pane' : 'Original VS Code window'
   const dialog = useRef<HTMLDialogElement>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -116,13 +119,13 @@ function SessionNavigation({ session, compact = false }: { session: Session; com
       {choices && (
         <div className="navigation-choices">
           <label>
-            Original VS Code window
+            {selectionLabel}
             <select
-              aria-label="Original VS Code window"
+              aria-label={selectionLabel}
               value={instanceId}
               onChange={(event) => setInstanceId(event.target.value)}
             >
-              <option value="">Choose a window</option>
+              <option value="">{terminal ? 'Choose a terminal' : 'Choose a window'}</option>
               {choices.windows.map((window) => (
                 <option key={window.instanceId} value={window.instanceId}>
                   {window.label}
@@ -136,7 +139,7 @@ function SessionNavigation({ session, compact = false }: { session: Session; com
             onClick={() => void reveal(choices.reference, instanceId)}
           >
             <ArrowUpRight size={14} />
-            Open selected window
+            {terminal ? 'Focus selected terminal' : 'Open selected window'}
           </button>
         </div>
       )}
@@ -151,19 +154,19 @@ function SessionNavigation({ session, compact = false }: { session: Session; com
     <div className={`session-navigation ${compact ? 'session-navigation-compact' : ''}`}>
       <button
         className={`${compact ? 'icon-button' : 'button button-secondary'} open-session-button`}
-        aria-label={compact ? 'Open session in VS Code' : undefined}
-        title={compact ? 'Open session in VS Code' : undefined}
+        aria-label={compact ? `Open session in ${targetLabel}` : undefined}
+        title={compact ? `Open session in ${targetLabel}` : undefined}
         disabled={busy}
         onClick={() => void reveal(referenceForSession(session))}
       >
         {busy ? <LoaderCircle size={15} className="spin" /> : <ArrowUpRight size={15} />}
-        {!compact && 'Open saved Chat in VS Code'}
+        {!compact && (terminal ? 'Open Claude terminal' : 'Open saved Chat in VS Code')}
       </button>
       {compact ? (
         <dialog
           ref={dialog}
           className="navigation-dialog"
-          aria-label="VS Code session navigation"
+          aria-label={`${targetLabel} session navigation`}
           onClose={() => {
             setDialogOpen(false)
             setMessage('')
@@ -171,7 +174,7 @@ function SessionNavigation({ session, compact = false }: { session: Session; com
           }}
         >
           <div className="navigation-dialog-header">
-            <h2>Open in VS Code</h2>
+            <h2>{terminal ? 'Open Claude terminal' : 'Open in VS Code'}</h2>
             <IconButton label="Close session navigation" onClick={() => setDialogOpen(false)}>
               <X size={17} />
             </IconButton>
@@ -506,7 +509,7 @@ function SessionCard({
   onSelect: () => void
   index: number
 }) {
-  const canNavigate = !!desktop && session.source === 'vscode'
+  const canNavigate = !!desktop && (session.source === 'vscode' || session.source === 'claude')
   return (
     <div className="session-card-shell">
       <button
@@ -1393,7 +1396,8 @@ function Workspace() {
             </p>
           )}
           {miniPageSessions.map((session) => {
-            const canNavigate = !!desktop && session.source === 'vscode'
+            const canNavigate =
+              !!desktop && (session.source === 'vscode' || session.source === 'claude')
             return (
               <div className="mini-session-shell" key={session.id}>
                 <button
@@ -1990,7 +1994,7 @@ function Workspace() {
                   )}
                   <SessionTimeline key={selected.id} session={selected} />
                   <div className="inspector-footer">
-                    {desktop && selected.source === 'vscode' && (
+                    {desktop && (selected.source === 'vscode' || selected.source === 'claude') && (
                       <SessionNavigation key={selected.id} session={selected} />
                     )}
                     {selected.status === 'completed' && (

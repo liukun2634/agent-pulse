@@ -117,6 +117,8 @@ function createLiveSources(adapters, onUpdate) {
   return {
     view: (source) => (source === 'live' ? combinedView() : snapshots.get(source)),
     sessions: () => [...snapshots.values()].flatMap((snapshot) => snapshot.sessions),
+    refreshSource: (source) =>
+      closed || !Object.hasOwn(adapters, source) ? Promise.resolve() : refreshSource(source, true),
     refresh(force = false) {
       if (closed) return Promise.resolve()
       return Promise.all(Object.keys(adapters).map((source) => refreshSource(source, force)))

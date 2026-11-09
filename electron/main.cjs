@@ -22,6 +22,7 @@ const { createAlertHistory } = require('./alert-history.cjs')
 const { createDesktopState, validateSources, constrainBounds } = require('./desktop-state.cjs')
 const { createClaudeHooks } = require('./claude-hooks.cjs')
 const { createSessionNavigator } = require('./session-navigation.cjs')
+const { createTerminalNavigator } = require('./terminal-navigation.cjs')
 const bridgeProtocol = require('../vscode-session-bridge/protocol.cjs')
 const fs = require('node:fs')
 
@@ -101,7 +102,20 @@ const initializedSources = new Set()
 const liveSources = createLiveSources({ vscode: vscodeSource, claude: claudeSource }, (source) => {
   if (!quitting) publishFeed(feed.source === 'demo' ? feed : liveSources.view(feed.source), source)
 })
+const terminalNavigator = createTerminalNavigator({
+  getSession: (id) => liveSources.sessions().find((item) => item.id === id),
+  resolveTarget: (id) => claudeSource.navigationTarget(id),
+  refresh: () => liveSources.refreshSource('claude'),
+  ...(testMode
+    ? {
+        run: async () => {
+          throw new Error('Native terminal control is disabled in tests.')
+        },
+      }
+    : {}),
+})
 const sessionNavigator = createSessionNavigator({
+  revealTerminal: (...args) => terminalNavigator.reveal(...args),
   getSession: (id) => liveSources.sessions().find((item) => item.id === id),
   resolveTarget: (id) => vscodeSource.navigationTarget(id),
   listWindows: () =>

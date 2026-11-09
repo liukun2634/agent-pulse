@@ -799,6 +799,19 @@ test(
       await main.getByRole('combobox', { name: 'Agent filter' }).selectOption('all')
       await expect(main.locator('.session-card')).toHaveCount(3)
       await main.locator('.session-card').filter({ hasText: 'Claude busy sample' }).click()
+      const claudeCard = main
+        .locator('.session-card-shell')
+        .filter({ hasText: 'Claude busy sample' })
+      const claudeDialog = main.getByRole('dialog', { name: 'Claude terminal session navigation' })
+      await expect(claudeDialog).not.toBeVisible()
+      await claudeCard
+        .getByRole('button', { name: 'Open session in Claude terminal', exact: true })
+        .click()
+      await expect(claudeDialog).toContainText('No live interactive Claude terminal')
+      await claudeDialog.getByRole('button', { name: 'Close session navigation' }).click()
+      await expect(
+        main.getByRole('button', { name: 'Open Claude terminal', exact: true }),
+      ).toBeVisible()
       await expect(
         main.getByRole('button', { name: 'Open original window', exact: true }),
       ).toHaveCount(0)
@@ -829,6 +842,16 @@ test(
       await expect(mini.locator('.mini-session')).toHaveCount(3)
       await expect(mini.locator('.mini-idle .mini-session-end')).toHaveText('Idle')
       const claudeMini = mini.locator('.mini-session').filter({ hasText: 'Claude busy sample' })
+      const claudeMiniDialog = mini.getByRole('dialog', {
+        name: 'Claude terminal session navigation',
+      })
+      await mini
+        .locator('.mini-session-shell')
+        .filter({ hasText: 'Claude busy sample' })
+        .getByRole('button', { name: 'Open session in Claude terminal', exact: true })
+        .click()
+      await expect(claudeMiniDialog).toContainText('No live interactive Claude terminal')
+      await claudeMiniDialog.getByRole('button', { name: 'Close session navigation' }).click()
       await expect(claudeMini.locator('.mini-session-end')).not.toContainText('Idle')
       await mini.screenshot({
         path: '.artifacts/combined-mini.png',

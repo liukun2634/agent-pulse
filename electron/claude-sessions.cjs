@@ -35,6 +35,7 @@ function createClaudeSource({
 } = {}) {
   const scope = createHash('sha256').update(path.resolve(configRoot)).digest('hex').slice(0, 16)
   let cache = new Map()
+  let navigationTargets = new Map()
   let pending
   let controller
   let closed = false
@@ -109,6 +110,7 @@ function createClaudeSource({
 
   function beginRecovery() {
     if (closed) return
+    navigationTargets.clear()
     cache = new Map(
       [...cache].map(([id, item]) => [
         id,
@@ -128,6 +130,7 @@ function createClaudeSource({
       if (!Array.isArray(entries) || entries.length > 10000)
         throw new Error('Invalid Claude session list.')
       const next = new Map()
+      const nextTargets = new Map()
       let invalid = 0
       for (const entry of entries) {
         if (
@@ -148,6 +151,8 @@ function createClaudeSource({
           continue
         }
         const id = `claude:${scope}:${identity}`
+        if (entry.kind === 'interactive' && Number.isSafeInteger(entry.pid) && entry.pid > 0)
+          nextTargets.set(id, { sessionId: identity, pid: entry.pid, startedAt: entry.startedAt })
         const previous = cache.get(id)
         const status = claudeStatus(entry)
         const changed = !previous || previous.status !== status
@@ -229,7 +234,10 @@ function createClaudeSource({
         if (next.size <= Math.max(entries.length, 1000)) break
         if (item.status === 'disconnected') next.delete(id)
       }
-      if (!closed) cache = next
+      if (!closed) {
+        cache = next
+        navigationTargets = nextTargets
+      }
       return {
         source: 'claude',
         state: invalid ? 'error' : entries.length ? 'connected' : 'empty',
@@ -260,6 +268,7 @@ function createClaudeSource({
 
   return {
     beginRecovery,
+    navigationTarget: (id) => navigationTargets.get(id) ?? null,
     subscribe: (listener) => hooks?.subscribe(listener),
     scan(now = Date.now()) {
       if (closed) return Promise.reject(new Error('Claude source is closed.'))
@@ -272,6 +281,7 @@ function createClaudeSource({
     },
     close() {
       closed = true
+      navigationTargets.clear()
       controller?.abort()
     },
   }

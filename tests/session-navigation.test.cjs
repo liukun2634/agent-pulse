@@ -4,6 +4,232 @@ const path = require('node:path')
 const { createSessionNavigator } = require('../electron/session-navigation.cjs')
 const { sessionReference } = require('../electron/session-alerts.cjs')
 const { isTrustedRequest } = require('../vscode-session-bridge/protocol.cjs')
+const { createTerminalNavigator } = require('../electron/terminal-navigation.cjs')
+
+test('Claude navigation requires an explicit terminal choice and reuses only the same process binding', async () => {
+  const current = {
+    id: 'claude:one',
+    source: 'claude',
+    requestId: 'round',
+    status: 'waiting',
+    updatedAt: 1,
+  }
+  let target = { sessionId: 'one', pid: 12345, startedAt: 1000 }
+  const reference = sessionReference(current)
+  const calls = []
+  const result = {
+    processStart: '1000',
+    hostStart: '500',
+    choices: [
+      { windowHandle: '100', tabId: '42.1', label: 'First tab' },
+      { windowHandle: '100', tabId: '42.2', label: 'Second tab' },
+    ],
+  }
+  const navigator = createTerminalNavigator({
+    platform: 'win32',
+    getSession: () => current,
+    resolveTarget: () => target,
+    run: async (action, _target, selection) => {
+      calls.push({ action, selection })
+      return action === 'inspect'
+        ? result
+        : {
+            ...result,
+            choices: undefined,
+            focused: true,
+            windowFocused: true,
+            selection: { ...selection, paneId: '42.3' },
+          }
+    },
+  })
+  const offered = await navigator.reveal(current.id, reference)
+  assert.equal(offered.mode, 'ambiguous')
+  assert.equal(offered.windows.length, 2)
+  assert.deepEqual(
+    calls.map((call) => call.action),
+    ['inspect'],
+  )
+  assert.equal((await navigator.reveal(current.id, reference, 'unknown')).mode, 'stale')
+  assert.equal(calls.length, 1)
+  assert.equal(
+    (await navigator.reveal(current.id, reference, offered.windows[1].instanceId)).mode,
+    'requested',
+  )
+  assert.equal(calls[1].selection.tabId, '42.2')
+  assert.equal((await navigator.reveal(current.id, reference)).mode, 'requested')
+  assert.equal(calls[2].action, 'focus')
+  assert.equal(calls[2].selection.paneId, '42.3')
+  target = { ...target, startedAt: 2000 }
+  assert.equal((await navigator.reveal(current.id, reference)).mode, 'ambiguous')
+  assert.equal(calls.at(-1).action, 'inspect')
+})
+
+test('Claude navigation rejects changed requests, missing processes and failed native focus', async () => {
+  let current = {
+    id: 'claude:one',
+    source: 'claude',
+    requestId: 'round',
+    status: 'waiting',
+    updatedAt: 1,
+  }
+  let target = { sessionId: 'one', pid: 12345, startedAt: 1000 }
+  const reference = sessionReference(current)
+  let focusCalls = 0
+  const navigator = createTerminalNavigator({
+    platform: 'win32',
+    getSession: () => current,
+    resolveTarget: () => target,
+    run: async (action) => {
+      if (action === 'focus') {
+        focusCalls++
+        throw new Error('Closed')
+      }
+      return {
+        processStart: '1000',
+        hostStart: '500',
+        choices: [{ windowHandle: '100', tabId: '42.1', label: 'Tab' }],
+      }
+    },
+  })
+  const offered = await navigator.reveal(current.id, reference)
+  current = { ...current, requestId: 'new-round' }
+  assert.equal(
+    (await navigator.reveal(current.id, reference, offered.windows[0].instanceId)).mode,
+    'stale',
+  )
+  assert.equal(focusCalls, 0)
+  current = { ...current, requestId: 'round' }
+  assert.equal(
+    (await navigator.reveal(current.id, reference, offered.windows[0].instanceId)).mode,
+    'unavailable',
+  )
+  assert.equal(focusCalls, 1)
+  target = null
+  assert.equal((await navigator.reveal(current.id, reference)).mode, 'unavailable')
+})
+
+test('Claude split panes require a second choice and a changed process during refresh is rejected', async () => {
+  const current = {
+    id: 'claude:split',
+    source: 'claude',
+    requestId: 'round',
+    status: 'waiting',
+    updatedAt: 1,
+  }
+  let target = { sessionId: 'split', pid: 12345, startedAt: 1000 }
+  let changeProcess = false
+  let calls = 0
+  const base = { processStart: '1000', hostStart: '500' }
+  const tab = { windowHandle: '100', tabId: '42.1', label: 'Selected tab' }
+  const navigator = createTerminalNavigator({
+    platform: 'win32',
+    getSession: () => current,
+    resolveTarget: () => target,
+    refresh: async () => {
+      if (changeProcess) target = { ...target, pid: 54321 }
+    },
+    run: async (action, _target, selection) => {
+      calls++
+      if (action === 'inspect') return { ...base, choices: [tab] }
+      if (!selection.paneId)
+        return {
+          ...base,
+          choices: [
+            { ...tab, paneId: '42.2', label: 'Left pane' },
+            { ...tab, paneId: '42.3', label: 'Right pane' },
+          ],
+        }
+      return { ...base, focused: true, windowFocused: true, selection }
+    },
+  })
+  const reference = sessionReference(current)
+  const tabs = await navigator.reveal(current.id, reference)
+  const panes = await navigator.reveal(current.id, reference, tabs.windows[0].instanceId)
+  assert.equal(panes.mode, 'ambiguous')
+  assert.equal(panes.windows.length, 2)
+  assert.equal(
+    (await navigator.reveal(current.id, reference, panes.windows[1].instanceId)).mode,
+    'requested',
+  )
+  changeProcess = true
+  assert.equal((await navigator.reveal(current.id, reference)).mode, 'stale')
+  assert.equal(calls, 3)
+})
+
+test('Claude navigation does not report success when Windows refuses foreground focus', async () => {
+  const current = {
+    id: 'claude:focus',
+    source: 'claude',
+    requestId: 'round',
+    status: 'waiting',
+    updatedAt: 1,
+  }
+  const target = { sessionId: 'focus', pid: 12345, startedAt: 1000 }
+  const navigator = createTerminalNavigator({
+    platform: 'win32',
+    getSession: () => current,
+    resolveTarget: () => target,
+    run: async (action, _target, selection) =>
+      action === 'inspect'
+        ? {
+            processStart: '1000',
+            hostStart: '500',
+            choices: [{ windowHandle: '100', tabId: '42.1', label: 'Tab' }],
+          }
+        : {
+            processStart: '1000',
+            hostStart: '500',
+            focused: true,
+            windowFocused: false,
+            selection: { ...selection, paneId: '42.2' },
+          },
+  })
+  const reference = sessionReference(current)
+  const offered = await navigator.reveal(current.id, reference)
+  assert.equal(
+    (await navigator.reveal(current.id, reference, offered.windows[0].instanceId)).mode,
+    'unavailable',
+  )
+  assert.equal((await navigator.reveal(current.id, reference)).mode, 'ambiguous')
+})
+
+test('shared navigation routes Claude without using the VS Code bridge', async () => {
+  const current = {
+    id: 'claude:one',
+    source: 'claude',
+    requestId: 'round',
+    status: 'waiting',
+    updatedAt: 1,
+  }
+  let calls = 0
+  const navigator = createSessionNavigator({
+    getSession: () => current,
+    resolveTarget: () => assert.fail('VS Code resolver must not run'),
+    listWindows: () => assert.fail('VS Code window discovery must not run'),
+    revealTerminal: async (id, reference, chosen) => {
+      calls++
+      assert.equal(id, current.id)
+      assert.equal(reference.requestId, 'round')
+      assert.equal(chosen, 'choice')
+      return { mode: 'requested', windowFocused: true }
+    },
+  })
+  assert.equal(
+    (await navigator.reveal(current.id, sessionReference(current), 'choice')).mode,
+    'requested',
+  )
+  assert.equal(
+    (
+      await navigator.reveal(
+        current.id,
+        { ...sessionReference(current), requestId: 'old' },
+        'choice',
+      )
+    ).mode,
+    'stale',
+  )
+  assert.equal(calls, 1)
+})
 
 test('bridge rejects malformed or expired packets before accessing navigation fields', () => {
   const registration = {

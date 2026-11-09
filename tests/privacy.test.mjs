@@ -37,6 +37,27 @@ test('site publication excludes unlisted private files and desktop packaging exc
   }
 })
 
+test('Apache license metadata and license copies are included in desktop and bridge distributions', () => {
+  const license = fs.readFileSync('LICENSE', 'utf8')
+  assert.match(license, /Apache License\s+Version 2\.0, January 2004/)
+  assert.match(license, /Grant of Patent License/)
+  assert.match(license, /END OF TERMS AND CONDITIONS/)
+  assert.equal(fs.readFileSync('vscode-session-bridge/LICENSE', 'utf8'), license)
+  const desktop = JSON.parse(fs.readFileSync('package.json', 'utf8'))
+  const bridge = JSON.parse(fs.readFileSync('vscode-session-bridge/package.json', 'utf8'))
+  for (const directory of ['.', 'vscode-session-bridge']) {
+    const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'))
+    const lock = JSON.parse(fs.readFileSync(path.join(directory, 'package-lock.json'), 'utf8'))
+    assert.equal(manifest.license, 'Apache-2.0')
+    assert.equal(lock.packages[''].license, manifest.license)
+  }
+  assert.ok(
+    desktop.build.extraResources.some((item) => item.from === 'LICENSE' && item.to === 'LICENSE'),
+  )
+  assert.ok(bridge.files.includes('LICENSE'))
+  assert.equal(bridge.scripts.package.includes('--skip-license'), false)
+})
+
 test('private runtime files and credentials are ignored before staging', () => {
   const files = [
     '.env',

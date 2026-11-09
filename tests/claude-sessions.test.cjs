@@ -13,6 +13,36 @@ const entry = {
   status: 'idle',
 }
 
+test('terminal targets follow live interactive Claude processes and clear on recovery', async () => {
+  let entries = [{ ...entry, pid: 12345 }]
+  const source = createClaudeSource({ query: async () => JSON.stringify(entries) })
+  try {
+    const snapshot = await source.scan(2000)
+    const id = snapshot.sessions[0].id
+    assert.deepEqual(source.navigationTarget(id), {
+      sessionId: entry.sessionId,
+      pid: 12345,
+      startedAt: 1000,
+    })
+    assert.equal(JSON.stringify(snapshot).includes('"pid"'), false)
+    source.beginRecovery()
+    assert.equal(source.navigationTarget(id), null)
+    await source.scan(3000)
+    assert.equal(source.navigationTarget(id).pid, 12345)
+    entries = [{ ...entry, kind: 'background', pid: 12345 }]
+    await source.scan(4000)
+    assert.equal(source.navigationTarget(id), null)
+    entries = [{ ...entry, pid: 54321, startedAt: 5000 }]
+    await source.scan(6000)
+    assert.equal(source.navigationTarget(id).pid, 54321)
+    entries = []
+    await source.scan(7000)
+    assert.equal(source.navigationTarget(id), null)
+  } finally {
+    source.close()
+  }
+})
+
 test('local hooks authenticate, redact content and reject stale prompt completions', async () => {
   const fs = require('node:fs')
   const path = require('node:path')
@@ -387,6 +417,40 @@ test('real sources publish independently and a slow Claude scan does not pause V
   assert.equal(sources.sessions().length, 2)
   assert.equal(sources.view('vscode').sessions.length, 1)
   sources.close()
+})
+
+test('navigation refreshes only the requested source and publishes its current state', async () => {
+  let vscodeScans = 0
+  let claudeScans = 0
+  const sources = createLiveSources(
+    {
+      vscode: {
+        scan: async () => {
+          vscodeScans++
+          return { sessions: [] }
+        },
+        close() {},
+      },
+      claude: {
+        scan: async () => {
+          claudeScans++
+          return { sessions: [{ id: 'claude:one' }] }
+        },
+        close() {},
+      },
+    },
+    () => {},
+  )
+  try {
+    await sources.refreshSource('claude')
+    assert.equal(vscodeScans, 0)
+    assert.equal(claudeScans, 1)
+    assert.equal(sources.sessions()[0].id, 'claude:one')
+    await sources.refreshSource('missing')
+    assert.equal(claudeScans, 1)
+  } finally {
+    sources.close()
+  }
 })
 
 test('Claude reminders use their own provider and idle does not announce a reply', () => {

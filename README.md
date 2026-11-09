@@ -45,6 +45,8 @@ Visit the **[Windows download page](https://liukun2634.github.io/agent-pulse/dow
 
 Agent Pulse is a Windows development preview for local VS Code / GitHub Copilot and Claude Code sessions. More integrations and session navigation are still being developed. Features in the source build may not yet be included in the latest download. The browser preview uses sample data only.
 
+Claude terminal navigation is experimental and limited to Windows Terminal. It requires an explicit tab or pane selection and never launches or resumes a Claude session. Reliable foreground switching is still under validation.
+
 Keep Pulse running, including in the tray, to receive reminders. Pulse observes sessions without sending messages or approving permissions. An idle agent is not assumed to have finished its reply.
 
 ## Development
@@ -64,10 +66,8 @@ Before opening a pull request, run `npm test`, `npm run build` and `npm run lint
 
 ## Contributing
 
-Bug reports, usability feedback, documentation improvements and focused pull requests are welcome. Try Pulse in your workflow and help shape what comes next.
+See the [contribution guide](CONTRIBUTING.md) for reporting issues, proposing changes and submitting pull requests.
 
-- **Share feedback:** [open an issue](https://github.com/liukun2634/agent-pulse/issues) with what you expected and what happened. Include your app and VS Code versions for bugs.
-- **Improve the project:** pick a focused change, describe its purpose and include a check for the behavior you change.
-- **Propose bigger ideas:** discuss new integrations or workflow changes in an issue before starting a large implementation.
+## License
 
-Remove private conversation content, credentials and sensitive paths from any logs or screenshots you share.
+Agent Pulse is licensed under the [Apache License 2.0](LICENSE). Third-party components retain their respective licenses.

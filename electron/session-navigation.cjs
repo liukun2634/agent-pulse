@@ -8,7 +8,7 @@ function storageKey(value) {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved
 }
 
-function createSessionNavigator({ getSession, resolveTarget, listWindows, send }) {
+function createSessionNavigator({ getSession, resolveTarget, listWindows, send, revealTerminal }) {
   return {
     async reveal(id, reference, instanceId) {
       const current = getSession(id)
@@ -17,6 +17,8 @@ function createSessionNavigator({ getSession, resolveTarget, listWindows, send }
           mode: 'stale',
           message: 'This request changed. Select the current session and retry.',
         }
+      if (current.source === 'claude' && revealTerminal)
+        return revealTerminal(id, reference, instanceId)
       if (current.source !== 'vscode')
         return {
           mode: 'unavailable',
